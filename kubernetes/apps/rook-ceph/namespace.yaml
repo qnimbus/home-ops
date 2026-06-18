@@ -1,0 +1,11 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rook-ceph
+  labels:
+    # Rook's mon/mgr/OSD daemons run as privileged pods (raw block-device and,
+    # in our case, host-network access). Pin the PodSecurity enforce level so
+    # these workloads are admitted regardless of any future cluster-wide PSA
+    # tightening — every other namespace here relies on the permissive default.
+    pod-security.kubernetes.io/enforce: privileged

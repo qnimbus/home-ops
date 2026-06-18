@@ -1,0 +1,98 @@
+machine:
+  sysctls:
+    # ── inotify ────────────────────────────────────────────────────────────────
+    # Flux controllers, container runtimes, and monitoring agents each open
+    # thousands of inotify watches. The kernel default (8 192 watches / 128
+    # instances per UID) is exhausted under a typical controller-heavy workload,
+    # causing "too many open files" errors in Flux or node-exporter.
+    fs.inotify.max_user_watches: "1048576"
+    fs.inotify.max_user_instances: "8192"
+
+    # ── TCP socket buffer ceilings ─────────────────────────────────────────────
+    # rmem_max / wmem_max are hard per-socket ceilings. The kernel's TCP
+    # autotuner allocates actual buffers dynamically within [default, max] based
+    # on the connection's measured bandwidth × RTT product — so setting a large
+    # ceiling does not waste memory; each socket only consumes what it needs.
+    #
+    # Why 128 MiB: the storage bond (10.200.0.0/24; ixgbe on cp-01/cp-02, i40e
+    # on cp-03) carries Ceph's cluster-network traffic — OSD↔OSD replication,
+    # recovery, and backfill over the messenger's TCP connections. Those are the
+    # flows that benefit from a generous per-socket buffer ceiling.
+    #
+    # Note (verified against Ceph Squid 19.2.3): Ceph multiplexes all heavy data
+    # between two OSD daemons onto a SINGLE cluster-messenger TCP connection —
+    # there is no per-peer connection multiplier. So buffer headroom matters per
+    # OSD-pair, and a single host-to-host transfer rides one connection (one LACP
+    # link). More parallel streams between two nodes come only from more OSD
+    # daemons (Rook storage.config.osdsPerDevice / more drives), not from tuning.
+    #
+    # At 10 Gbps with an intra-cluster RTT of ~100–300 µs the bandwidth-delay
+    # product is only ~125 KiB per flow, but the autotuner needs headroom above
+    # BDP to keep the pipe full during burst writes and parallel recovery.
+    # 128 MiB is the standard recommendation for 10 GbE storage replication.
+    #
+    # Management-interface connections (1 GbE e1000e on cp-01/cp-02) are
+    # unaffected: the autotuner will never scale those sockets past ~1 MiB
+    # because the link speed and RTT simply don't warrant it.
+    #
+    # Previous value was 7 500 000 (~7 MiB), sized only for QUIC/UDP (cloudflared).
+    net.core.rmem_max: "134217728"   # 128 MiB — receive socket buffer ceiling
+    net.core.wmem_max: "134217728"   # 128 MiB — transmit socket buffer ceiling
+
+    # tcp_rmem / tcp_wmem: "min  default  max" in bytes.
+    #   min     — guaranteed allocation even under memory pressure
+    #   default — starting size for every new TCP socket (overrides
+    #             net.core.rmem_default / wmem_default)
+    #   max     — autotuner ceiling; must not exceed rmem_max / wmem_max above
+    net.ipv4.tcp_rmem: "4096 87380 134217728"
+    net.ipv4.tcp_wmem: "4096 65536 134217728"
+
+    # ── NIC receive queue depth ────────────────────────────────────────────────
+    # Per-CPU backlog queue between NIC interrupt (NAPI) and kernel processing.
+    # At 10 Gbps, minimum-size (64 B) frames arrive at ~14.9 Mpps. With the
+    # default backlog of 1 000, a momentary softirq scheduling delay causes the
+    # queue to fill and the NIC to drop packets before they reach TCP — resulting
+    # in spurious retransmits and throughput collapse during replication microbursts.
+    # 300 000 matches the queue depth used in production 10/25 GbE storage nodes.
+    net.core.netdev_max_backlog: "300000"
+
+    # ── Ceph cluster-network TCP tuning ───────────────────────────────────────
+    # The following two knobs target Ceph's cross-node OSD↔OSD cluster-messenger
+    # connections (replication / recovery / backfill over the storage bonds).
+    #
+    # Slow-start after idle — default behaviour: TCP resets its congestion window
+    # (cwnd) back to the initial value (~10 segments) whenever a connection has
+    # been idle for one RTO period (~200 ms). OSD cluster-messenger connections
+    # are persistent but quiet between I/O bursts; each time a burst begins, TCP
+    # restarts the slow-start ramp and throttles throughput for the first 10–50 ms
+    # of every write. Setting this to 0 keeps the cwnd intact across idle gaps so
+    # bursts start at full speed.
+    net.ipv4.tcp_slow_start_after_idle: "0"   # 0 = disabled; preserve cwnd across idle
+
+    # Metrics save — default behaviour: TCP caches the measured RTT, cwnd, and
+    # SSTHRESH from a closed connection and reuses them when reconnecting to the
+    # same destination. After an OSD event (daemon restart, brief disruption),
+    # cluster-messenger connections reconnect carrying pessimistic metrics from
+    # the disrupted path, causing new connections to under-perform for several
+    # seconds until metrics are re-measured. Setting this to 1 forces every
+    # reconnect to start fresh.
+    net.ipv4.tcp_no_metrics_save: "1"         # 1 = discard cached metrics on close
+
+    # ── Congestion control ────────────────────────────────────────────────────
+    # CUBIC (the kernel default) treats packet loss as a congestion signal and
+    # halves its window on every drop. On a private storage VLAN under incast
+    # (multiple streams competing for the same switch port buffer), CUBIC
+    # produces cascading window reductions — observed as 60k+ retransmits at
+    # 16 parallel streams despite the link being otherwise healthy.
+    #
+    # BBR (Bottleneck Bandwidth and RTT) models the available bandwidth directly
+    # by measuring delivery rate and RTT. It paces output to match the measured
+    # bottleneck rather than reacting to loss, making it significantly more
+    # resilient to incast on high-speed storage fabrics.
+    #
+    # fq (Fair Queue) is a hard requirement for BBR: BBR relies on the qdisc to
+    # pace packets at the measured rate. Without fq, BBR sends bursts that
+    # overflow switch buffers instead of pacing steadily — retransmits would
+    # increase rather than decrease.
+    net.core.default_qdisc: "fq"
+    net.ipv4.tcp_congestion_control: "bbr"

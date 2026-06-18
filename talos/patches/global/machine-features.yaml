@@ -1,0 +1,60 @@
+machine:
+  features:
+    # ── apid certificate key usage enforcement ────────────────────────────────
+    # apid is the Talos API daemon; it presents TLS certificates to clients such
+    # as talosctl and external controllers. By default, Talos does not enforce
+    # X.509 Extended Key Usage (EKU) on those certificates, which means a cert
+    # issued for one purpose (e.g. signing) could technically be accepted for
+    # another (e.g. client auth). Setting this to true makes apid reject any
+    # certificate whose EKU does not explicitly permit the intended usage —
+    # eliminating an entire class of certificate-confusion attacks without
+    # requiring any change to how certs are issued.
+    apidCheckExtKeyUsage: true
+
+    # ── Disk quota support ────────────────────────────────────────────────────
+    # Enables the kernel's project-quota accounting on the EPHEMERAL partition.
+    # Required by storage drivers that use quotas to enforce per-volume size
+    # limits — notably OpenEBS LocalPV and Kubernetes ephemeral-storage limits
+    # on the node. Without this, `kubectl describe node` reports 0 for
+    # `ephemeral-storage` allocatable and per-pod storage limits are silently
+    # unenforced, which can allow a single container to fill the system disk.
+    diskQuotaSupport: true
+
+    hostDNS:
+      enabled: true
+      # resolveMemberNames lets pods use node hostnames for in-cluster DNS
+      # resolution without going through CoreDNS — useful for Talos machined
+      # and for debugging node identity from inside pods.
+      resolveMemberNames: true
+      # forwardKubeDNSToHost: false — pods use CoreDNS, not the host resolver.
+      # Enabling this would route all pod DNS through the node's resolver, which
+      # bypasses the cluster search domain and breaks service discovery.
+      forwardKubeDNSToHost: false
+
+    # ── KubePrism (local API proxy) ───────────────────────────────────────────
+    # KubePrism runs a lightweight proxy on every node (port 7445) that forwards
+    # kube-apiserver requests to whichever control-plane node is currently
+    # healthy. Without it, workloads that talk to the API (Flux, cert-manager,
+    # operators) must go through the VIP (10.60.0.2). The VIP depends on
+    # kube-vip's ARP-based leader election, which adds a failure mode: if the
+    # VIP holder reboots, there is a brief window where the API is unreachable
+    # and leader-elected controllers (ESO, cert-manager) stall.
+    #
+    # With KubePrism, in-cluster traffic hits 127.0.0.1:7445 on the pod's own
+    # node, bypassing the VIP entirely. The proxy performs its own health checks
+    # across all CP endpoints and fails over within milliseconds. The VIP is
+    # still needed for external access (talosctl, kubectl from the devcontainer),
+    # but internal cluster resilience no longer depends on it.
+    kubePrism:
+      enabled: true
+      port: 7445
+
+    # ── RBAC ──────────────────────────────────────────────────────────────────
+    # Enables Kubernetes RBAC for the Talos API. Without this, any process that
+    # can reach apid with a valid client cert gets unrestricted OS-level access
+    # to the node — the equivalent of giving every pod root access to the host.
+    # With RBAC enabled, talosctl operations are gated by the roles embedded in
+    # the client cert (os:reader, os:admin, etc.). Declared explicitly rather
+    # than relying on the Talos default so the intent is visible and the setting
+    # survives version changes.
+    rbac: true

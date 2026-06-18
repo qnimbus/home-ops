@@ -1,0 +1,19 @@
+---
+connect:
+  serviceType: ClusterIP
+  credentialsName: onepassword-connect-secrets
+  credentialsKey: 1password-credentials.json
+  api:
+    resources:
+      requests:
+        cpu: 30m
+        memory: 100Mi
+      limits:
+        memory: 100Mi
+  sync:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 100Mi
+      limits:
+        memory: 100Mi

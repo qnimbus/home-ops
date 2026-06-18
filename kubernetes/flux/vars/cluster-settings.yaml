@@ -1,0 +1,11 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-settings
+  namespace: flux-system
+  labels:
+    reconcile.fluxcd.io/watch: "Enabled"
+data:
+  CLUSTER_NAME: "home-lab"
+  CLUSTER_TIMEZONE: "Europe/Amsterdam"

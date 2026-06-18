@@ -1,0 +1,35 @@
+---
+# yaml-language-server: $schema=https://schemas.clustrs.dev/kustomize.toolkit.fluxcd.io/kustomization_v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: &app flux-instance
+  namespace: flux-system
+  labels:
+    substitution.flux.home.arpa/disabled: "true"
+spec:
+  targetNamespace: flux-system
+  commonMetadata:
+    labels:
+      app.kubernetes.io/name: *app
+  dependsOn:
+    - name: flux-operator
+      namespace: flux-system
+    # flux-github-app ExternalSecret in this path requires the ESO webhook to be
+    # serving before dry-run validation passes; without this the Kustomization
+    # fails transiently on every bootstrap until ESO is ready.
+    - name: external-secrets
+      namespace: flux-system
+  wait: false
+  prune: true
+  interval: 1h
+  path: ./kubernetes/apps/flux-system/flux-instance/app
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+    namespace: flux-system
+  healthChecks:
+    - apiVersion: helm.toolkit.fluxcd.io/v2
+      kind: HelmRelease
+      name: *app
+      namespace: flux-system

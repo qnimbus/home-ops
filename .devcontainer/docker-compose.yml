@@ -1,0 +1,26 @@
+services:
+  devcontainer:
+    image: mcr.microsoft.com/devcontainers/python:latest
+    stdin_open: true
+    tty: true
+    volumes:
+      - type: bind
+        source: ..
+        target: /workspaces/home-lab
+        consistency: cached
+      - claude-home:/home/vscode/.claude
+      - home-local:/home/vscode/.local
+      - home-kub:/home/vscode/.kube
+
+  meshcommander:
+    build:
+      context: .
+      dockerfile: Dockerfile.meshcommander
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+
+volumes:
+  claude-home:
+  home-local:
+  home-kub:

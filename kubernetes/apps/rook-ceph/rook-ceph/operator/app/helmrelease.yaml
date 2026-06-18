@@ -1,0 +1,40 @@
+---
+# yaml-language-server: $schema=https://kubernetes-schemas.pages.dev/helm.toolkit.fluxcd.io/helmrelease_v2.json
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: rook-ceph-operator
+spec:
+  chartRef:
+    kind: OCIRepository
+    name: rook-ceph
+    namespace: flux-system
+  interval: 1h
+  values:
+    # Let the chart manage Rook's CRDs (CephCluster, CephBlockPool, …).
+    crds:
+      enabled: true
+    # Pull the Ceph/Rook image from GHCR to avoid Docker Hub rate limits.
+    image:
+      repository: ghcr.io/rook/ceph
+    csi:
+      # We only need the RBD (block) CSI driver for the ceph-block StorageClass.
+      # CephFS (shared filesystem) is not used yet — leave its driver off to cut
+      # the CSI pod footprint. Flip these on when a CephFS is introduced.
+      enableCephfsDriver: false
+      enableCephfsSnapshotter: false
+      enableLiveness: true
+      # kube-prometheus-stack installs before rook-ceph-operator (see dependsOn
+      # chain), so the ServiceMonitor CRD is guaranteed present at install time.
+      serviceMonitor:
+        enabled: true
+    # Fail Ceph CLI calls fast rather than hanging the operator reconcile.
+    cephCommandsTimeoutSeconds: "20"
+    monitoring:
+      enabled: true
+    resources:
+      requests:
+        cpu: 80m
+        memory: 256Mi
+      limits:
+        memory: 512Mi

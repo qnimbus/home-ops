@@ -1,0 +1,16 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+configMapGenerator:
+  - name: smartctl-exporter-values
+    namespace: observability
+    files:
+      - values.yaml=./helm/values.yaml
+generatorOptions:
+  labels:
+    reconcile.fluxcd.io/watch: "Enabled"
+configurations:
+  - ./helm/kustomizeconfig.yaml
+resources:
+  - ./helmrelease.yaml

@@ -1,0 +1,21 @@
+---
+# yaml-language-server: $schema=https://kubernetes-schemas.pages.dev/source.toolkit.fluxcd.io/ocirepository_v1.json
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: plugin-barman-cloud
+  namespace: flux-system
+spec:
+  interval: 1h
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: copy
+  url: oci://ghcr.io/cloudnative-pg/charts/plugin-barman-cloud
+  ref:
+    # renovate: datasource=docker depName=ghcr.io/cloudnative-pg/charts/plugin-barman-cloud
+    tag: "0.7.0"
+  verify:
+    provider: cosign
+    matchOIDCIdentity:
+      - issuer: https://token.actions.githubusercontent.com
+        subject: ^https://github.com/cloudnative-pg/charts

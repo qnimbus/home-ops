@@ -1,0 +1,9 @@
+machine:
+  network:
+    disableSearchDomain: true
+    nameservers:
+      - "10.60.0.1"   # clusterDNS in talenv.yaml
+    extraHostEntries:
+      - ip: "10.60.0.2"   # clusterEndpoint in talenv.yaml
+        aliases:
+          - kube-vip.home.arpa

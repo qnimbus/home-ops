@@ -1,0 +1,15 @@
+---
+# yaml-language-server: $schema=https://schemas.clustrs.dev/helm.toolkit.fluxcd.io/helmrelease_v2.json
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: cert-manager
+spec:
+  interval: 1h
+  chartRef:
+    kind: OCIRepository
+    name: cert-manager
+    namespace: flux-system
+  valuesFrom:
+    - kind: ConfigMap
+      name: cert-manager-values

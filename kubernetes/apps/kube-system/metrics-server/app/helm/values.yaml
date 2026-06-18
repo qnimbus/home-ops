@@ -1,0 +1,15 @@
+args:
+  - --kubelet-insecure-tls
+  - --kubelet-preferred-address-types=InternalIP,Hostname,ExternalIP
+  # tolerate slow/loaded kubelets
+  - --kubelet-request-timeout=10s
+  # collect metrics every 30s (default is 60s)
+  - --metric-resolution=30s
+metrics:
+  enabled: true
+serviceMonitor:
+  enabled: true
+resources:
+  requests:
+    cpu: 100m
+    memory: 200Mi

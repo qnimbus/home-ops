@@ -1,0 +1,53 @@
+---
+# yaml-language-server: $schema=https://kubernetes-schemas.pages.dev/postgresql.cnpg.io/cluster_v1.json
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: postgres-v17
+spec:
+  instances: 3
+  # renovate: datasource=docker depName=ghcr.io/cloudnative-pg/postgresql
+  imageName: ghcr.io/cloudnative-pg/postgresql:17.6
+  affinity:
+    podAntiAffinityType: required
+  # Ref: https://github.com/cloudnative-pg/cloudnative-pg/issues/2570
+  enablePDB: false
+  enableSuperuserAccess: true
+  superuserSecret:
+    name: cloudnative-pg-secret
+  monitoring:
+    enablePodMonitor: true
+  plugins:
+    - isWALArchiver: true
+      name: barman-cloud.cloudnative-pg.io
+      parameters:
+        barmanObjectName: cloudnative-pg-storj
+        serverName: ${CNPG_V17_CURRENT_CLUSTER}
+  postgresql:
+    parameters:
+      # Forces a WAL switch every 5m even on light write volume, bounding the
+      # barman-cloud archiving gap. Default is 0 (disabled) - segments only
+      # archive once full (16MB), which on a quiet cluster could leave far
+      # more than 5m of data unprotected between uploads.
+      archive_timeout: 5min
+      max_connections: "300"
+      pg_stat_statements.max: "10000"
+      pg_stat_statements.track: all
+      shared_buffers: 512MB
+    synchronous:
+      method: any
+      number: 1
+  primaryUpdateStrategy: unsupervised
+  replicationSlots:
+    highAvailability:
+      enabled: true
+    updateInterval: 30
+  resources:
+    requests:
+      cpu: 80m
+      memory: 768Mi
+    limits:
+      memory: 2Gi
+  storage:
+    size: 20Gi
+    storageClass: openebs-hostpath

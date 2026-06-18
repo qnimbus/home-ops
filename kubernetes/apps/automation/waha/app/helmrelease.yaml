@@ -1,0 +1,164 @@
+---
+# yaml-language-server: $schema=https://schemas.clustrs.dev/helm.toolkit.fluxcd.io/helmrelease_v2.json
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: &app waha
+spec:
+  interval: 1h
+  chartRef:
+    kind: OCIRepository
+    name: app-template
+    namespace: flux-system
+  values:
+    controllers:
+      waha:
+        annotations:
+          reloader.stakater.com/auto: "true"
+        type: deployment
+        replicas: 1
+        revisionHistoryLimit: 1
+        strategy: Recreate
+        containers:
+          app:
+            image:
+              repository: docker.io/devlikeapro/waha
+              # renovate: datasource=docker depName=docker.io/devlikeapro/waha
+              tag: "gows-2026.5.1"
+            # Secret keys injected individually so WAHA_API_KEY_PLAIN is excluded from the environment;
+            # the plain key is accessible only via the file mount at /run/secrets/waha (see persistence below).
+            env:
+              # PLUS-only: these three vars are no-ops on CORE; session auto-start is handled by the postStart hook below
+              WHATSAPP_START_SESSION: "true"
+              WHATSAPP_RESTART_ALL_SESSIONS: "true"
+              WAHA_WORKER_RESTART_SESSIONS: "true"
+              WHATSAPP_FILES_LIFETIME: "180"
+              WHATSAPP_DEFAULT_ENGINE: "GOWS"
+              WHATSAPP_HOOK_EVENTS: "message,session.status"
+              WAHA_AUTO_START_DELAY_SECONDS: "5"
+              WAHA_LOG_FORMAT: "JSON"
+              WAHA_LOG_LEVEL: "info"
+              TZ: "${CLUSTER_TIMEZONE}"
+              WAHA_API_KEY:
+                valueFrom:
+                  secretKeyRef:
+                    name: waha-secret
+                    key: WAHA_API_KEY
+              WAHA_DASHBOARD_USERNAME:
+                valueFrom:
+                  secretKeyRef:
+                    name: waha-secret
+                    key: WAHA_DASHBOARD_USERNAME
+              WAHA_DASHBOARD_PASSWORD:
+                valueFrom:
+                  secretKeyRef:
+                    name: waha-secret
+                    key: WAHA_DASHBOARD_PASSWORD
+              WHATSAPP_HOOK_HMAC_KEY:
+                valueFrom:
+                  secretKeyRef:
+                    name: waha-secret
+                    key: WHATSAPP_HOOK_HMAC_KEY
+              WHATSAPP_SWAGGER_USERNAME:
+                valueFrom:
+                  secretKeyRef:
+                    name: waha-secret
+                    key: WHATSAPP_SWAGGER_USERNAME
+              WHATSAPP_SWAGGER_PASSWORD:
+                valueFrom:
+                  secretKeyRef:
+                    name: waha-secret
+                    key: WHATSAPP_SWAGGER_PASSWORD
+            lifecycle:
+              postStart:
+                # WAHA CORE does not auto-start sessions on server restart; this hook replicates that behaviour.
+                # Runs concurrently with the app process; container stays in ContainerCreating until the hook exits,
+                # so the session is started before readiness probes ever fire.
+                # Step 1: POST /api/sessions/default/start — works cleanly on restart (session on PVC).
+                # Step 2: 404 means fresh PVC; fall back to POST /api/sessions to create+start.
+                # Start-first avoids the 422 "already exists" error log WAHA emits on every restart
+                # when the create endpoint is called first.
+                # "|| true" prevents a hook failure from triggering an unnecessary container restart.
+                # WAHA_API_KEY is a bcrypt hash; WAHA uses bcrypt-verify mode, so the hook sends the plain
+                # key read from the file mount — keeping it out of the process environment entirely.
+                exec:
+                  command:
+                    - /bin/sh
+                    - -c
+                    - |
+                      until curl -sf http://localhost:3000/ping > /dev/null; do sleep 2; done
+                      curl -sf -X POST http://localhost:3000/api/sessions/default/start \
+                        -H "Content-Type: application/json" \
+                        -H "X-Api-Key: $(cat /run/secrets/waha/WAHA_API_KEY_PLAIN)" || \
+                      curl -sf -X POST http://localhost:3000/api/sessions \
+                        -H "Content-Type: application/json" \
+                        -H "X-Api-Key: $(cat /run/secrets/waha/WAHA_API_KEY_PLAIN)" \
+                        -d '{"name":"default","start":true}' || true
+            probes:
+              liveness:
+                enabled: true
+                custom: true
+                spec:
+                  httpGet:
+                    path: /ping
+                    port: &port 3000
+                    scheme: HTTP
+                  initialDelaySeconds: 30
+                  periodSeconds: 30
+                  timeoutSeconds: 5
+                  failureThreshold: 3
+              readiness:
+                enabled: true
+                custom: true
+                spec:
+                  httpGet:
+                    path: /ping
+                    port: *port
+                    scheme: HTTP
+                  initialDelaySeconds: 10
+                  periodSeconds: 15
+                  timeoutSeconds: 5
+                  failureThreshold: 3
+            resources:
+              requests:
+                cpu: 50m
+                memory: 128Mi
+              limits:
+                memory: 384Mi
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop: ["ALL"]
+    defaultPodOptions:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+    service:
+      app:
+        ports:
+          http:
+            port: *port
+    persistence:
+      waha-secrets:
+        type: secret
+        name: waha-secret
+        globalMounts:
+          - path: /run/secrets/waha
+            readOnly: true
+      sessions:
+        type: persistentVolumeClaim
+        storageClass: ceph-block
+        accessMode: ReadWriteOnce
+        size: 2Gi
+        globalMounts:
+          - path: /app/.sessions
+      media:
+        type: emptyDir
+        globalMounts:
+          - path: /tmp/whatsapp-files
+      tmp:
+        type: emptyDir
+        globalMounts:
+          - path: /tmp

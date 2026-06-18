@@ -1,0 +1,36 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+---
+version: '3'
+
+tasks:
+
+  encrypt:
+    desc: Inject 1Password op:// references from a *.sops.yaml.tpl and write a SOPS-encrypted *.sops.yaml [FILE=...]
+    summary: |
+      Resolves all op:// references in FILE via `op inject`, then encrypts the
+      output with SOPS using the creation rules from .sops.yaml.
+
+      The output is written to the same path with the .tpl suffix removed, e.g.:
+        kubernetes/apps/.../secret.sops.yaml.tpl  →  kubernetes/apps/.../secret.sops.yaml
+
+      Example:
+        task sops:encrypt FILE=kubernetes/apps/external-secrets/onepassword-connect/app/secret.sops.yaml.tpl
+    dir: '{{.ROOT_DIR}}'
+    vars:
+      FILE: '{{.FILE | default ""}}'
+      OUT:  '{{trimSuffix ".tpl" .FILE}}'
+    preconditions:
+      - sh: test -n "{{.FILE}}"
+        msg: "Usage: task sops:encrypt FILE=path/to/secret.sops.yaml.tpl"
+      - sh: test -f "{{.FILE}}"
+        msg: "Template not found: {{.FILE}}"
+      - sh: 'case "{{.FILE}}" in *.sops.yaml.tpl) true;; *) false;; esac'
+        msg: "FILE must end in .sops.yaml.tpl, got: {{.FILE}}"
+      - which op
+      - sh: test -n "$OP_SERVICE_ACCOUNT_TOKEN"
+        msg: "OP_SERVICE_ACCOUNT_TOKEN not set — export it in your WSL2 host shell before starting devcontainer"
+      - which sops
+      - test -f '{{.SOPS_AGE_KEY_FILE}}'
+    cmds:
+      - op inject -i "{{.FILE}}" | sops --filename-override "{{.OUT}}" --encrypt /dev/stdin > "{{.OUT}}"
+      - echo "Encrypted → {{.OUT}}"

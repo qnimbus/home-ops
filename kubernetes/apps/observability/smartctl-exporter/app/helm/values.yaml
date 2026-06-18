@@ -1,0 +1,24 @@
+---
+# The chart deploys a DaemonSet with securityContext.privileged: true and
+# mounts /dev from the host — smartctl scans all block devices automatically.
+# No device list needed; the exporter runs smartctl --scan on each node.
+
+serviceMonitor:
+  enabled: true
+  interval: 60s
+  scrapeTimeout: 30s
+
+prometheusRules:
+  enabled: true
+  rules:
+    # NVMe SMART temperatures are less accurate than node_hwmon_temp_celsius;
+    # hardware-temps PrometheusRule handles temperature alerting via hwmon instead.
+    smartCTLDDeviceTemperature:
+      enabled: false
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 64Mi

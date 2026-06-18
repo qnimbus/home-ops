@@ -1,0 +1,23 @@
+# Strategic merge patch — configures PodSecurity admission in observe-only mode.
+# enforce: privileged  → nothing is blocked (safe for infra charts that need host access)
+# audit/warn: baseline → API server logs violations; kubectl surfaces warnings to operators
+# Previously set to [] (no plugins) via a JSON 6902 "op: remove" patch, which talhelper
+# rejects for multi-document machine configs introduced in Talos v1.12.
+cluster:
+  apiServer:
+    admissionControl:
+      - name: PodSecurity
+        configuration:
+          apiVersion: pod-security.admission.config.k8s.io/v1
+          kind: PodSecurityConfiguration
+          defaults:
+            enforce: "privileged"
+            enforce-version: "latest"
+            audit: "baseline"
+            audit-version: "latest"
+            warn: "baseline"
+            warn-version: "latest"
+          exemptions:
+            usernames: []
+            runtimeClasses: []
+            namespaces: []

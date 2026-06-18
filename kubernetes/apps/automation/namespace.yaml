@@ -1,0 +1,8 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: automation
+  annotations:
+    # Prevent Flux from pruning this namespace if all apps are temporarily removed
+    kustomize.toolkit.fluxcd.io/prune: disabled

@@ -1,0 +1,77 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/gateway.networking.k8s.io/gateway_v1.json
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: envoy-external
+  annotations:
+    external-dns.alpha.kubernetes.io/target: "external.${DOMAIN_IO}"
+spec:
+  gatewayClassName: envoy
+  infrastructure:
+    annotations:
+      # Pin this gateway to a specific IP from the CiliumLoadBalancerIPPool
+      lbipam.cilium.io/ips: "10.60.0.230"
+      # UniFi external-dns (service source) creates: external.vwn.io → 10.60.0.230
+      external-dns.alpha.kubernetes.io/hostname: "external.${DOMAIN_IO}"
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: https
+      protocol: HTTPS
+      port: 443
+      allowedRoutes:
+        namespaces:
+          from: All
+      tls:
+        certificateRefs:
+          - kind: Secret
+            name: vwn-app-tls
+          - kind: Secret
+            name: vwn-casa-tls
+          - kind: Secret
+            name: cluster-vwn-io-tls
+          - kind: Secret
+            name: apps-vwn-io-tls
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/gateway.networking.k8s.io/gateway_v1.json
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: envoy-internal
+  annotations:
+    external-dns.alpha.kubernetes.io/target: "internal.${DOMAIN_PROXII}"
+spec:
+  gatewayClassName: envoy
+  infrastructure:
+    annotations:
+      lbipam.cilium.io/ips: "10.60.0.231"
+      # UniFi external-dns (service source) creates: internal.proxii.nl → 10.60.0.231
+      external-dns.alpha.kubernetes.io/hostname: "internal.${DOMAIN_PROXII}"
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: https
+      protocol: HTTPS
+      port: 443
+      allowedRoutes:
+        namespaces:
+          from: All
+      tls:
+        certificateRefs:
+          - kind: Secret
+            name: vwn-app-tls
+          - kind: Secret
+            name: vwn-casa-tls
+          - kind: Secret
+            name: cluster-vwn-io-tls
+          - kind: Secret
+            name: apps-vwn-io-tls

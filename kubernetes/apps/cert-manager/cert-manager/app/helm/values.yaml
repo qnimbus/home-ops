@@ -1,0 +1,50 @@
+---
+crds:
+  enabled: true
+# Disabled during bootstrap: the webhook's self-signed TLS cert isn't issued yet
+# when this post-install Job runs, causing it to fail and triggering atomic rollback.
+# Flux verifies cert-manager health via healthChecks after bootstrap completes.
+startupapicheck:
+  enabled: false
+# 2 replicas + topology spread: pre-places one pod per two nodes so a cp-03 failure triggers
+# leader-election failover (~60 s lease duration) instead of pod rescheduling (~5-6 min).
+# All three components share app.kubernetes.io/instance: cert-manager — the scheduler counts
+# all 6 pods (3 components x 2 replicas) as one group, targeting a 2/2/2 split across nodes.
+# matchLabelKeys: [pod-template-hash] scopes counting to the current ReplicaSet generation,
+# preventing rolling upgrades from temporarily violating maxSkew and blocking new pods.
+replicaCount: 2
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+    matchLabelKeys:
+      - pod-template-hash
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/instance: cert-manager
+dns01RecursiveNameservers: https://1.1.1.1:443/dns-query,https://1.0.0.1:443/dns-query
+dns01RecursiveNameserversOnly: true
+webhook:
+  # Webhook is an HTTP admission server (not leader-elected) — both replicas serve
+  # simultaneously. A node failure causes zero admission downtime with 2 replicas.
+  replicaCount: 2
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      matchLabelKeys:
+        - pod-template-hash
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/instance: cert-manager
+cainjector:
+  replicaCount: 2
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      matchLabelKeys:
+        - pod-template-hash
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/instance: cert-manager

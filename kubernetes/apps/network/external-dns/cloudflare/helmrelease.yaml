@@ -1,0 +1,47 @@
+---
+# yaml-language-server: $schema=https://schemas.clustrs.dev/helm.toolkit.fluxcd.io/helmrelease_v2.json
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: &app external-dns-cloudflare
+spec:
+  chartRef:
+    kind: OCIRepository
+    name: external-dns
+    namespace: flux-system
+  interval: 1h
+  values:
+    domainFilters:
+      - "${DOMAIN_APP}"
+      - "${DOMAIN_CASA}"
+      - "${DOMAIN_IO}"
+      - "${DOMAIN_APPS}"
+    env:
+      - name: CF_API_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: &secret external-dns-cloudflare-secret
+            key: CF_API_TOKEN
+    extraArgs:
+      - --cloudflare-dns-records-per-page=1000
+      - --cloudflare-proxied
+      - --crd-source-apiversion=externaldns.k8s.io/v1alpha1
+      - --crd-source-kind=DNSEndpoint
+      - --gateway-name=envoy-external
+    fullnameOverride: *app
+    policy: sync
+    provider: cloudflare
+    resources:
+      requests:
+        cpu: 15m
+        memory: 64Mi
+      limits:
+        memory: 64Mi
+    serviceMonitor:
+      enabled: false
+    sources:
+      - gateway-httproute
+      - crd
+    triggerLoopOnEvent: true
+    txtOwnerId: k8s
+    txtPrefix: "k8s."

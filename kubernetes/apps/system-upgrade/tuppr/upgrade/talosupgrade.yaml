@@ -1,0 +1,15 @@
+---
+apiVersion: tuppr.home-operations.com/v1alpha1
+kind: TalosUpgrade
+metadata:
+  name: cluster
+  namespace: system-upgrade
+spec:
+  talos:
+    # renovate: datasource=docker depName=ghcr.io/siderolabs/installer
+    version: v1.13.2
+  policy:
+    rebootMode: default
+  # Upgrade one node at a time; safe default for a 4-node cluster (3 CPs + 1 worker)
+  # where losing two CP nodes simultaneously would break etcd quorum
+  parallelism: 1

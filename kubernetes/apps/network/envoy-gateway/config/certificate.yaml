@@ -1,0 +1,72 @@
+---
+# yaml-language-server: $schema=https://schemas.clustrs.dev/cert-manager.io/certificate_v1.json
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: wildcard-vwn-app
+spec:
+  secretName: vwn-app-tls
+  issuerRef:
+    name: letsencrypt-production
+    kind: ClusterIssuer
+    group: cert-manager.io
+  privateKey:
+    rotationPolicy: Always
+  commonName: "${DOMAIN_APP}"
+  dnsNames:
+    - "${DOMAIN_APP}"
+    - "*.${DOMAIN_APP}"
+---
+# yaml-language-server: $schema=https://schemas.clustrs.dev/cert-manager.io/certificate_v1.json
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: wildcard-vwn-casa
+spec:
+  secretName: vwn-casa-tls
+  issuerRef:
+    name: letsencrypt-production
+    kind: ClusterIssuer
+    group: cert-manager.io
+  privateKey:
+    rotationPolicy: Always
+  commonName: "${DOMAIN_CASA}"
+  dnsNames:
+    - "${DOMAIN_CASA}"
+    - "*.${DOMAIN_CASA}"
+---
+# yaml-language-server: $schema=https://schemas.clustrs.dev/cert-manager.io/certificate_v1.json
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: wildcard-cluster-vwn-io
+spec:
+  secretName: cluster-vwn-io-tls
+  issuerRef:
+    name: letsencrypt-production
+    kind: ClusterIssuer
+    group: cert-manager.io
+  privateKey:
+    rotationPolicy: Always
+  commonName: "${DOMAIN_CLUSTER}"
+  dnsNames:
+    - "${DOMAIN_CLUSTER}"
+    - "*.${DOMAIN_CLUSTER}"
+---
+# yaml-language-server: $schema=https://schemas.clustrs.dev/cert-manager.io/certificate_v1.json
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: wildcard-apps-vwn-io
+spec:
+  secretName: apps-vwn-io-tls
+  issuerRef:
+    name: letsencrypt-production
+    kind: ClusterIssuer
+    group: cert-manager.io
+  privateKey:
+    rotationPolicy: Always
+  commonName: "${DOMAIN_APPS}"
+  dnsNames:
+    - "${DOMAIN_APPS}"
+    - "*.${DOMAIN_APPS}"

@@ -1,0 +1,30 @@
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sops-age
+  namespace: flux-system
+stringData:
+  age.agekey: |
+    op://homelab/sops/SOPS_PRIVATE_KEY
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: onepassword-connect-secrets
+  namespace: external-secrets
+stringData:
+  1password-credentials.json: |
+    op://homelab/HomeLab Credentials File/1password-credentials.json
+  token: op://homelab/HomeLab Access Token/credential
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: flux-github-app
+  namespace: flux-system
+stringData:
+  githubAppID: op://homelab/GitHub App/githubAppID
+  githubAppInstallationID: op://homelab/GitHub App/githubAppInstallationID
+  githubAppPrivateKey: |
+    op://homelab/GitHub App/githubAppPrivateKey

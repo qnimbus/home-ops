@@ -1,0 +1,12 @@
+---
+# Only one KubernetesUpgrade resource is allowed per cluster (enforced by tuppr's admission webhook).
+# Edit spec.kubernetes.version to trigger an upgrade; do not create a second resource.
+apiVersion: tuppr.home-operations.com/v1alpha1
+kind: KubernetesUpgrade
+metadata:
+  name: kubernetes
+  namespace: system-upgrade
+spec:
+  kubernetes:
+    # renovate: datasource=docker depName=ghcr.io/siderolabs/kubelet
+    version: v1.36.1

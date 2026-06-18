@@ -1,0 +1,9 @@
+# renovate: datasource=docker depName=ghcr.io/siderolabs/installer
+talosVersion: v1.13.2
+talosImageURL: "factory.talos.dev/installer/1aaf751348ca0f837eca199fa21933d3375641d972f9fb0d816e7bf87c81f1fc"
+# renovate: datasource=docker depName=ghcr.io/siderolabs/kubelet
+kubernetesVersion: v1.36.1
+# Network — verify these match your environment before running talhelper genconfig
+clusterEndpoint: "10.60.0.2"
+nodeSubnet: "10.60.0.0/24"
+clusterDNS: "10.60.0.1"

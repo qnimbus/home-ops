@@ -1,0 +1,8 @@
+FROM node:lts-alpine
+# renovate: datasource=npm depName=meshcommander
+RUN npm install -g meshcommander@0.9.5-a
+# meshcommander hardcodes 127.0.0.1; patch top-level JS to bind 0.0.0.0 for Docker port forwarding
+RUN find /usr/local/lib/node_modules/meshcommander -maxdepth 1 -name "*.js" \
+    -exec sed -i "s/'127\.0\.0\.1'/'0.0.0.0'/g" {} \;
+EXPOSE 3000
+CMD ["meshcommander"]

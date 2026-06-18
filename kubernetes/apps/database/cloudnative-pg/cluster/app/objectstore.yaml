@@ -1,0 +1,32 @@
+---
+# yaml-language-server: $schema=https://kubernetes-schemas.pages.dev/barmancloud.cnpg.io/objectstore_v1.json
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: cloudnative-pg-storj
+spec:
+  configuration:
+    destinationPath: "s3://cloudnative-pg"
+    endpointURL: "https://gateway.storjshare.io"
+    data:
+      compression: bzip2
+    wal:
+      compression: bzip2
+      maxParallel: 8
+    s3Credentials:
+      accessKeyId:
+        name: cloudnative-pg-secret
+        key: CNPG_S3_ACCESS_KEY
+      secretAccessKey:
+        name: cloudnative-pg-secret
+        key: CNPG_S3_SECRET_KEY
+  instanceSidecarConfiguration:
+    # Storj's S3 gateway rejects PutObject requests using botocore's newer
+    # chunked-trailer checksum encoding (no Content-Length header) with
+    # "MissingContentLength" - revert to the legacy header-based behaviour.
+    env:
+      - name: AWS_REQUEST_CHECKSUM_CALCULATION
+        value: when_required
+      - name: AWS_RESPONSE_CHECKSUM_VALIDATION
+        value: when_required
+  retentionPolicy: 30d

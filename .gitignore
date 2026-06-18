@@ -1,0 +1,23 @@
+# Ignore files and directories that should not be committed to the repository
+.archive/
+.agents
+.claude/skills
+.claude/skills/*
+.claude/settings.local.json
+
+# Ignore IDE/editor specific files and folders
+.vscode/
+
+# Ignore build artifacts and assets (e.g. iso images, VM images, etc.)
+assets/
+tmp/
+
+# Ignore sensitive files and environment variables
+kubeconfig
+age.key
+.env
+.mcp.json
+known_hosts
+flux-deploy-key*
+flux-deploy-key
+docs/*.json

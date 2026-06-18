@@ -1,0 +1,26 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: flux-system
+resources:
+  - ./app-template.yaml
+  - ./cert-manager.yaml
+  - ./external-dns.yaml
+  - ./coredns.yaml
+  - ./envoy-gateway.yaml
+  - ./flux-instance.yaml
+  - ./flux-operator.yaml
+  - ./openebs.yaml
+  - ./spegel.yaml
+  - ./tuppr.yaml
+  - ./kube-prometheus-stack.yaml
+  - ./smartctl-exporter.yaml
+  - ./gha-runner-scale-set-controller.yaml
+  - ./gha-runner-scale-set.yaml
+  - ./reloader.yaml
+  - ./tailscale-operator.yaml
+  - ./cloudnative-pg.yaml
+  - ./plugin-barman-cloud.yaml
+  - ./rook-ceph.yaml
+  - ./rook-ceph-cluster.yaml

@@ -1,0 +1,25 @@
+---
+# yaml-language-server: $schema=https://schemas.clustrs.dev/kustomize.toolkit.fluxcd.io/kustomization_v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: &app reloader
+  namespace: flux-system
+spec:
+  targetNamespace: reloader
+  commonMetadata:
+    labels:
+      app.kubernetes.io/name: *app
+  wait: true
+  prune: true
+  interval: 1h
+  path: ./kubernetes/apps/system/reloader/app
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+    namespace: flux-system
+  healthChecks:
+    - apiVersion: helm.toolkit.fluxcd.io/v2
+      kind: HelmRelease
+      name: *app
+      namespace: reloader

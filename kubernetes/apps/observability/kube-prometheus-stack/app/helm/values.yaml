@@ -1,0 +1,155 @@
+---
+# see: https://github.com/prometheus-community/helm-charts/blob/main/charts/kube-prometheus-stack/values.yaml
+
+crds:
+  enabled: true
+  upgradeJob:
+    # Runs kubectl apply --server-side on all CRDs before the operator pod rolls out.
+    # Required for multi-version jumps where CRD schemas change between each prometheus-operator minor release.
+    enabled: true
+
+alertmanager:
+  alertmanagerSpec:
+    # All nodes are control-plane only — no workers. Every pod needs this toleration or it won't schedule.
+    tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+    storage:
+      volumeClaimTemplate:
+        spec:
+          # ceph-block (replicated, size=3): survives a node loss, unlike the
+          # phase-1 emptyDir/openebs-hostpath this replaced.
+          storageClassName: ceph-block
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              # Alertmanager stores only silences + notification state — 1 Gi is ample.
+              storage: 1Gi
+
+grafana:
+  enabled: true
+  # Deploy pre-built dashboards for kube-prometheus-stack and node-exporter
+  # even if Grafana were deployed separately; with Grafana enabled these are picked up automatically.
+  forceDeployDashboards: true
+  admin:
+    existingSecret: grafana-admin-secret
+    userKey: admin-user
+    passwordKey: admin-password
+  # Recreate required: the PVC is RWO (ceph-block) — the old pod must fully unmount
+  # before the new one starts, or the RBD volume can't attach to the new pod.
+  deploymentStrategy:
+    type: Recreate
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+  persistence:
+    enabled: true
+    storageClassName: ceph-block
+    accessModes: [ReadWriteOnce]
+    size: 5Gi
+  sidecar:
+    dashboards:
+      enabled: true
+      # Search all namespaces for ConfigMaps labelled grafana_dashboard: "1"
+      searchNamespace: ALL
+    datasources:
+      enabled: true
+  grafana.ini:
+    server:
+      root_url: "https://grafana.${DOMAIN_CLUSTER}"
+  dashboards:
+    default:
+      node-exporter-full:
+        # Full hardware dashboard: CPU/mem/disk/network + hwmon temperatures (node_hwmon_temp_celsius)
+        # renovate: depName="Node Exporter Full" dashboardId=1860 revisionId=37
+        gnetId: 1860
+        revision: 37
+        datasource: Prometheus
+
+# Talos runs without kube-proxy (Cilium replaces it with eBPF)
+kubeProxy:
+  enabled: false
+
+# Talos etcd binds to the management subnet (10.60.0.0/24) only and requires
+# client certificates — additional auth configuration needed before this can be scraped.
+kubeEtcd:
+  enabled: false
+
+kube-state-metrics:
+  # All nodes are control-plane only — no workers.
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+
+prometheus:
+  prometheusSpec:
+    # When nil (unset), Prometheus falls back to filtering by Helm release labels — meaning it
+    # would only scrape ServiceMonitors/PodMonitors/etc. deployed by this same Helm release.
+    # Setting these to false makes the selector match everything (cluster-wide scraping).
+    podMonitorSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    scrapeConfigSelectorNilUsesHelmValues: false
+    serviceMonitorSelectorNilUsesHelmValues: false
+    retention: 14d
+    # Hard cap below the 20 Gi PVC size so Prometheus deletes old blocks before the disk fills,
+    # rather than running out of space and crashing.
+    retentionSize: 18GB
+    # All nodes are control-plane only — no workers.
+    tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+    resources:
+      requests:
+        cpu: 100m
+        memory: 512Mi
+      limits:
+        # No CPU limit intentionally — avoids throttling during scrape fan-out bursts.
+        memory: 2Gi
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          # ceph-block (replicated, size=3): survives a node loss, unlike the
+          # phase-1 emptyDir/openebs-hostpath this replaced.
+          storageClassName: ceph-block
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: 20Gi
+
+prometheusOperator:
+  # All nodes are control-plane only — no workers.
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+
+prometheus-node-exporter:
+  prometheus:
+    monitor:
+      # 10s scrape (overrides the 30s default) for pre-crash forensics on the M920Q
+      # nodes: cp-02 has gone hard-down several times leaving no post-reboot evidence,
+      # so the last samples before a hang must be dense and land on durable (ceph-block)
+      # Prometheus storage off the dying node. Scoped to node-exporter only — not the
+      # cluster-wide interval — to keep the extra series churn contained.
+      # DIAGNOSTIC (2026-06-10): this 3x sample density is the costly knob — REVERT to
+      # 30s (delete this line) once the cp-02 hard-down is root-caused. With no kernel-log
+      # capture possible on these UKI nodes (netconsole arg is ignored under systemd-boot,
+      # Talos #11145), these dense vitals are the primary pre-crash record. The 15s rule
+      # eval interval and the temperature alerts themselves are permanent and stay.
+      interval: 10s
+      metricRelabelings:
+        # Drop the super-I/O chip's unconnected thermistor input on the M920Q nodes.
+        # "Thermistor 7" (sensor temp5) reads ~127-128°C when the thermistor pin is
+        # floating — a hardware artefact, not a real temperature. Dropped at scrape
+        # time so the phantom never enters the TSDB. NOTE: node-exporter labels this
+        # chip "platform_nct6683_2592" (from the device path), NOT "nct6686" (the
+        # kernel name file) — the earlier "nct6686.*" regex matched nothing and the
+        # phantom was never actually dropped; corrected 2026-06-10.
+        - sourceLabels: [chip, sensor]
+          regex: "platform_nct6683.*;temp5"
+          action: drop

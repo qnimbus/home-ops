@@ -1,0 +1,25 @@
+---
+# yaml-language-server: $schema=https://datreeio.github.io/CRDs-catalog/cilium.io/ciliumloadbalancerippool_v2.json
+apiVersion: cilium.io/v2
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: pool
+spec:
+  blocks:
+    - start: "10.60.0.230"
+      stop: "10.60.0.249"
+---
+# yaml-language-server: $schema=https://datreeio.github.io/CRDs-catalog/cilium.io/ciliuml2announcementpolicy_v2alpha1.json
+apiVersion: cilium.io/v2alpha1
+kind: CiliumL2AnnouncementPolicy
+metadata:
+  name: l2-policy
+spec:
+  loadBalancerIPs: true
+  # Interfaces intentionally unspecified: Cilium announces on all interfaces.
+  # Storage bonds (bond0 on cp-01/02, bond1 on cp-03) are on an isolated L2
+  # network (10.200.0.0/24) with no route back to the management subnet, so
+  # ARP announcements on those interfaces are harmless.
+  nodeSelector:
+    matchLabels:
+      kubernetes.io/os: linux

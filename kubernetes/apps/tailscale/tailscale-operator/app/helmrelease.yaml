@@ -1,0 +1,20 @@
+---
+# yaml-language-server: $schema=https://schemas.clustrs.dev/helm.toolkit.fluxcd.io/helmrelease_v2.json
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: &app tailscale-operator
+spec:
+  chartRef:
+    kind: OCIRepository
+    name: tailscale-operator
+    namespace: flux-system
+  interval: 1h
+  values:
+    installCRDs: true
+    fullnameOverride: *app
+    oauthSecretVolume:
+      secret:
+        secretName: &secret tailscale-operator
+    operatorConfig:
+      hostname: *app

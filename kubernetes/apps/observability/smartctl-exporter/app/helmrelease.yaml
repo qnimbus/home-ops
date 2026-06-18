@@ -1,0 +1,16 @@
+---
+# yaml-language-server: $schema=https://schemas.clustrs.dev/helm.toolkit.fluxcd.io/helmrelease_v2.json
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: smartctl-exporter
+  namespace: observability
+spec:
+  interval: 1h
+  chartRef:
+    kind: OCIRepository
+    name: smartctl-exporter
+    namespace: flux-system
+  valuesFrom:
+    - kind: ConfigMap
+      name: smartctl-exporter-values

@@ -1,0 +1,59 @@
+---
+# yaml-language-server: $schema=https://kubernetes-schemas.pages.dev/monitoring.coreos.com/prometheusrule_v1.json
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cloudnative-pg-rules
+spec:
+  groups:
+    - name: cloudnative-pg.rules
+      rules:
+        - alert: LongRunningTransaction
+          annotations:
+            summary: A PostgreSQL transaction has been running for more than 5 minutes.
+          expr: cnpg_backends_max_tx_duration_seconds > 300
+          for: 1m
+          labels:
+            severity: warning
+        - alert: BackendsWaiting
+          annotations:
+            summary: PostgreSQL backends are blocked waiting for locks.
+          expr: cnpg_backends_waiting_total > 300
+          for: 1m
+          labels:
+            severity: warning
+        - alert: PGDatabase
+          annotations:
+            summary: A database is approaching transaction ID wraparound.
+          expr: cnpg_pg_database_xid_age > 300000000
+          for: 1m
+          labels:
+            severity: warning
+        - alert: PGReplication
+          annotations:
+            summary: A PostgreSQL standby is lagging behind the primary.
+          expr: cnpg_pg_replication_lag > 300
+          for: 1m
+          labels:
+            severity: warning
+        - alert: LastFailedArchiveTime
+          annotations:
+            summary: The last WAL archive failure is more recent than the last success.
+          expr: (cnpg_pg_stat_archiver_last_failed_time - cnpg_pg_stat_archiver_last_archived_time) > 1
+          for: 1m
+          labels:
+            severity: warning
+        - alert: DatabaseDeadlockConflicts
+          annotations:
+            summary: A PostgreSQL database is experiencing frequent deadlocks.
+          expr: cnpg_pg_stat_database_deadlocks > 10
+          for: 1m
+          labels:
+            severity: warning
+        - alert: ReplicaFailingReplication
+          annotations:
+            summary: A PostgreSQL replica is in recovery but WAL receiver is down.
+          expr: cnpg_pg_replication_in_recovery > cnpg_pg_replication_is_wal_receiver_up
+          for: 1m
+          labels:
+            severity: warning

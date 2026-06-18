@@ -1,0 +1,7 @@
+---
+controller:
+  logLevel: info  # switch to debug temporarily when diagnosing upgrade failures
+  leaderElection:
+    enabled: true  # safe even for single-replica; prevents split-brain if scale-out ever occurs
+  metrics:
+    enabled: true

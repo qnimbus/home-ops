@@ -1,0 +1,546 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+---
+version: '3'
+
+tasks:
+
+  iso:
+    desc: Register schematic with factory.talos.dev, download ISO, and update talenv.yaml
+    dir: '{{.TALOS_DIR}}'
+    vars:
+      TALOS_VERSION:
+        sh: yq '.talosVersion' {{.TALOS_DIR}}/talenv.yaml
+    cmds:
+      - |
+        RESPONSE=$(curl -sf -X POST \
+          --header "Content-Type: application/yaml" \
+          --data-binary @schematic.yaml \
+          "https://factory.talos.dev/schematics") \
+          || { echo "ERROR: failed to reach factory.talos.dev — check network and schematic.yaml" >&2; exit 1; }
+        SCHEMATIC_ID=$(printf '%s' "${RESPONSE}" | jq -r '.id')
+        printf '%s\n' "${SCHEMATIC_ID}" > .schematic-id
+        echo "Schematic ID: ${SCHEMATIC_ID}"
+        IMAGE_URL="factory.talos.dev/installer/${SCHEMATIC_ID}"
+        yq -i '.talosImageURL = "'"${IMAGE_URL}"'"' {{.TALOS_DIR}}/talenv.yaml
+        echo "Updated talenv.yaml: talosImageURL = ${IMAGE_URL}"
+        ISO_URL="https://factory.talos.dev/image/${SCHEMATIC_ID}/{{.TALOS_VERSION}}/metal-amd64.iso"
+        ISO_PATH="{{.ROOT_DIR}}/assets/talos-{{.TALOS_VERSION}}.iso"
+        mkdir -p "{{.ROOT_DIR}}/assets"
+        curl -L --progress-bar -o "${ISO_PATH}" "${ISO_URL}"
+        echo "Saved: assets/talos-{{.TALOS_VERSION}}.iso"
+    preconditions:
+      - test -f {{.TALOS_DIR}}/schematic.yaml
+      - test -f {{.TALOS_DIR}}/talenv.yaml
+      - which curl
+      - which jq
+      - which yq
+
+  genconfig:
+    desc: Generate Talos machine configs from talconfig.yaml
+    dir: '{{.TALOS_DIR}}'
+    cmd: talhelper genconfig
+    preconditions:
+      - test -f {{.TALOS_DIR}}/talconfig.yaml
+      - test -f {{.ROOT_DIR}}/.sops.yaml
+      - test -f {{.SOPS_AGE_KEY_FILE}}
+      - which talhelper
+
+  apply:
+    desc: Apply Talos config to a node [IP=required] [INSECURE=true for maintenance/bootstrap mode]
+    dir: '{{.TALOS_DIR}}'
+    vars:
+      INSECURE: '{{.INSECURE | default "false"}}'
+    cmd: talhelper gencommand apply --node {{.IP}}{{if eq .INSECURE "true"}} --extra-flags="--insecure"{{end}} | bash
+    requires:
+      vars: [IP]
+    preconditions:
+      - test -f {{.TALOSCONFIG}}
+      - test -f {{.TALOS_DIR}}/talconfig.yaml
+      - test -d {{.TALOS_DIR}}/clusterconfig
+      - which talhelper
+
+  apply-all:
+    desc: Apply Talos config to all nodes in maintenance mode — discovers IPs via nmap on 10.60.0.0/24, maps each node by installDiskSelector (serial takes priority over model)
+    silent: true
+    dir: '{{.TALOS_DIR}}'
+    cmds:
+      - |
+        CLUSTER=$(yq '.clusterName' talconfig.yaml)
+        NODE_COUNT=$(yq '.nodes | length' talconfig.yaml)
+
+        echo "Discovering maintenance-mode nodes (scanning subnets)..."
+        MAINT_IPS=$(nmap -p 50000 --open -T4 10.60.0.0/24 -oG - 2>/dev/null \
+          | awk '/50000\/open/{print $2}')
+        if [ -z "${MAINT_IPS}" ]; then
+          echo "ERROR: no nodes in maintenance mode found" >&2; exit 1
+        fi
+
+        APPLIED=0
+        SEEN_FP=""
+        SEEN_HOSTS=""  # guard: prevent same config being applied to two physical nodes
+        for IP in ${MAINT_IPS}; do
+          DISKS_JSON=$(talosctl get disks --nodes "${IP}" --insecure -o json 2>/dev/null) || true
+          if [ -z "${DISKS_JSON}" ]; then continue; fi
+          # Deduplicate multi-NIC hosts by disk serial fingerprint.
+          FP=$(printf '%s' "${DISKS_JSON}" \
+            | jq -r 'select(.spec.serial != null) | .spec.serial' | sort | tr '\n' ',') || true
+          if [ -z "${FP}" ]; then continue; fi
+          if echo "${SEEN_FP}" | grep -qF "${FP}"; then continue; fi
+          SEEN_FP="${SEEN_FP}|${FP}"
+
+          # Match this IP to a talconfig node.
+          #
+          # Matching priority (most-specific first):
+          #   1. installDiskSelector.serial — exact serial match; order-independent and unique
+          #      Use this whenever two nodes share the same disk model (e.g. two NV3 1TB nodes).
+          #   2. installDiskSelector.model  — substring match against disk model strings
+          #      Sufficient when all selectors are unique across the cluster.
+          #
+          # SEEN_HOSTS prevents the same config from being applied twice if model-only matching
+          # would otherwise match a second physical node with the same disk model.
+          #
+          # ORDERING IS STILL LOAD-BEARING for model-only nodes: selectors are checked in
+          # talconfig.yaml node order; the loop breaks on first match. Nodes with unique model
+          # selectors (talos-worker-01: IRP-SSDPR-P44N-01T-30; talos-worker-02: CT1000P310SSD2)
+          # must come before any node whose selector could also match their disks.
+          MATCHED_HOST=""
+          # Pass 1: serial-first — check all nodes that have a serial selector.
+          for i in $(seq 0 $((NODE_COUNT - 1))); do
+            HOSTNAME=$(yq ".nodes[${i}].hostname" talconfig.yaml)
+            SELECTOR_SERIAL=$(yq ".nodes[${i}].installDiskSelector.serial" talconfig.yaml)
+            if [ "${SELECTOR_SERIAL}" = "null" ]; then continue; fi
+            if echo "${SEEN_HOSTS}" | grep -qF "|${HOSTNAME}|"; then continue; fi
+            if printf '%s' "${DISKS_JSON}" \
+              | jq -r 'select(.spec.serial != null) | .spec.serial' \
+              | grep -qF "${SELECTOR_SERIAL}"; then
+              MATCHED_HOST="${HOSTNAME}"
+              break
+            fi
+          done
+          # Pass 2: model fallback — only if serial pass found nothing.
+          if [ -z "${MATCHED_HOST}" ]; then
+            for i in $(seq 0 $((NODE_COUNT - 1))); do
+              HOSTNAME=$(yq ".nodes[${i}].hostname" talconfig.yaml)
+              SELECTOR_MODEL=$(yq ".nodes[${i}].installDiskSelector.model" talconfig.yaml)
+              if [ "${SELECTOR_MODEL}" = "null" ]; then continue; fi
+              if echo "${SEEN_HOSTS}" | grep -qF "|${HOSTNAME}|"; then continue; fi
+              if printf '%s' "${DISKS_JSON}" \
+                | jq -r 'select(.spec.model != null) | .spec.model' \
+                | grep -qF "${SELECTOR_MODEL}"; then
+                MATCHED_HOST="${HOSTNAME}"
+                break
+              fi
+            done
+          fi
+
+          if [ -z "${MATCHED_HOST}" ]; then
+            echo "  ${IP}: no matching node in talconfig — skipping" >&2
+            continue
+          fi
+
+          SEEN_HOSTS="${SEEN_HOSTS}|${MATCHED_HOST}|"
+          CONFIG="clusterconfig/${CLUSTER}-${MATCHED_HOST}.yaml"
+          echo "  ${IP} → ${MATCHED_HOST} — applying ${CONFIG##*/}..."
+          # In maintenance mode the apply API always responds "without a reboot" regardless
+          # of --mode flags — the config is staged to disk. A separate reboot call is needed
+          # to transition the node out of maintenance mode.
+          if talosctl apply-config --insecure --nodes "${IP}" --file "${CONFIG}" 2>&1; then
+            echo "    ✓ config staged (node will reboot automatically)"
+          else
+            echo "    ✗ apply failed for ${IP} (${MATCHED_HOST})" >&2
+          fi
+          APPLIED=$((APPLIED + 1))
+        done
+        if [ "${APPLIED}" -eq 0 ]; then
+          echo "ERROR: no nodes were configured" >&2; exit 1
+        fi
+        echo "Done: ${APPLIED}/${NODE_COUNT} node(s) configured."
+    preconditions:
+      - test -f {{.TALOS_DIR}}/talconfig.yaml
+      - test -d {{.TALOS_DIR}}/clusterconfig
+      - which nmap
+      - which jq
+      - which yq
+      - which talosctl
+
+  bootstrap:
+    desc: Bootstrap etcd on the first control-plane node (run once after apply-all)
+    dir: '{{.TALOS_DIR}}'
+    cmd: until talhelper gencommand bootstrap | bash; do sleep 10; done
+    preconditions:
+      - test -f {{.TALOSCONFIG}}
+      - which talhelper
+      - which talosctl
+
+  etcd-validate:
+    desc: Validate etcd member peer URLs against expected CP node IPs; remove members with stale/transient IPs [BOOTSTRAP_NODE=IP]
+    dir: '{{.TALOS_DIR}}'
+    vars:
+      BOOTSTRAP_NODE: '{{.BOOTSTRAP_NODE | default ""}}'
+    cmd: |
+      # Derive expected CP IPs from talconfig.yaml (controlPlane: true nodes only).
+      EXPECTED_IPS=$(yq '.nodes[] | select(.controlPlane == true) | .ipAddress' talconfig.yaml \
+        | tr '\n' '|' | sed 's/|$//')
+      echo "Expected CP peer IPs: $(echo "${EXPECTED_IPS}" | tr '|' ' ')"
+
+      # Use the provided bootstrap node IP, or fall back to the first CP node.
+      NODE_IP="{{.BOOTSTRAP_NODE}}"
+      if [ -z "${NODE_IP}" ]; then
+        NODE_IP=$(yq '.nodes[] | select(.controlPlane == true) | .ipAddress' talconfig.yaml | head -1)
+      fi
+      echo "Querying etcd members via ${NODE_IP}..."
+
+      # Give etcd a moment to settle after bootstrap before checking.
+      sleep 5
+
+      MEMBERS=$(talosctl etcd members --nodes "${NODE_IP}" 2>&1)
+      if echo "${MEMBERS}" | grep -q "^error\|connection refused\|rpc error"; then
+        echo "ERROR: could not reach etcd on ${NODE_IP}" >&2
+        echo "${MEMBERS}" >&2
+        exit 1
+      fi
+      echo "${MEMBERS}"
+
+      # Extract member IDs and peer URLs; flag any whose IP is not in the expected list.
+      REMOVED=0
+      while IFS= read -r line; do
+        # Member table rows: ID  HOSTNAME  PEER_URL  CLIENT_URL  LEARNER
+        MEMBER_ID=$(echo "${line}" | awk '{print $1}')
+        PEER_URL=$(echo "${line}" | awk '{print $3}')
+        # Extract the IP from the URL (strip scheme and port).
+        PEER_IP=$(echo "${PEER_URL}" | sed 's|https\?://||; s|:.*||')
+        if [ -z "${PEER_IP}" ] || [ "${PEER_IP}" = "PEER" ]; then continue; fi
+        # Check if this IP is in the expected list.
+        if ! echo "${PEER_IP}" | grep -qE "^(${EXPECTED_IPS})$"; then
+          echo "  STALE MEMBER: ID=${MEMBER_ID} peer=${PEER_URL} — IP not in expected list, removing..."
+          talosctl etcd remove-member --nodes "${NODE_IP}" "${MEMBER_ID}" \
+            && echo "    ✓ removed ${MEMBER_ID}" \
+            || echo "    ✗ failed to remove ${MEMBER_ID} — remove manually"
+          REMOVED=$((REMOVED + 1))
+        else
+          echo "  OK: ${MEMBER_ID} peer=${PEER_URL}"
+        fi
+      done < <(talosctl etcd members --nodes "${NODE_IP}" 2>/dev/null | tail -n +2)
+
+      if [ "${REMOVED}" -gt 0 ]; then
+        echo ""
+        echo "Removed ${REMOVED} stale member(s). Affected nodes will rejoin automatically on next reboot."
+        echo "If a node is stuck, run: task talos:reboot-node IP=<node-ip>"
+      else
+        echo "All etcd members have expected peer URLs. No action needed."
+      fi
+    preconditions:
+      - test -f {{.TALOS_DIR}}/talconfig.yaml
+      - test -f {{.TALOSCONFIG}}
+      - which talosctl
+      - which yq
+
+  kubeconfig:
+    desc: Fetch kubeconfig from the cluster
+    dir: '{{.TALOS_DIR}}'
+    cmd: until talhelper gencommand kubeconfig --extra-flags="{{.ROOT_DIR}} --force" | bash; do sleep 10; done
+    preconditions:
+      - test -f {{.TALOSCONFIG}}
+      - which talhelper
+      - which talosctl
+
+  upgrade-node:
+    desc: Upgrade Talos on a single node [IP=required]
+    dir: '{{.TALOS_DIR}}'
+    cmd: talhelper gencommand upgrade --node {{.IP}} --extra-flags "--timeout=10m" | bash
+    requires:
+      vars: [IP]
+    preconditions:
+      - test -f {{.TALOSCONFIG}}
+      - which talhelper
+      - which talosctl
+
+  reboot-node:
+    desc: Reboot a single Talos node [IP=required]
+    cmd: talosctl reboot --nodes {{.IP}}
+    requires:
+      vars: [IP]
+    preconditions:
+      - test -f {{.TALOSCONFIG}}
+      - which talosctl
+
+  shutdown-node:
+    desc: Gracefully power off a single Talos node [IP=required]
+    cmd: talosctl shutdown --nodes {{.IP}}
+    requires:
+      vars: [IP]
+    preconditions:
+      - test -f {{.TALOSCONFIG}}
+      - which talosctl
+
+  upgrade-k8s:
+    desc: Upgrade Kubernetes to the version in talenv.yaml
+    dir: '{{.TALOS_DIR}}'
+    cmd: talhelper gencommand upgrade-k8s --extra-flags "--to '{{.KUBERNETES_VERSION}}'" | bash
+    vars:
+      KUBERNETES_VERSION:
+        sh: yq '.kubernetesVersion' {{.TALOS_DIR}}/talenv.yaml
+    preconditions:
+      - test -f {{.TALOSCONFIG}}
+      - which talhelper
+      - which talosctl
+      - which yq
+
+  wait-maintenance:
+    desc: Wait until all cluster nodes appear in maintenance mode (scans 10.60.0.0/24)
+    dir: '{{.TALOS_DIR}}'
+    silent: true
+    vars:
+      NODE_COUNT:
+        sh: yq '.nodes | length' {{.TALOS_DIR}}/talconfig.yaml
+    cmd: |
+      EXPECTED={{.NODE_COUNT}}
+      printf 'Waiting for %d node(s) in maintenance mode (scanning subnets)...\n' "${EXPECTED}"
+      while true; do
+        FINGERPRINTS=""
+        FOUND=0
+        SUMMARY=""
+        for IP in $(nmap -p 50000 --open -T4 10.60.0.0/24 -oG - 2>/dev/null \
+          | awk '/50000\/open/{print $2}'); do
+          DISKS_JSON=$(talosctl get disks --nodes "${IP}" --insecure -o json 2>/dev/null) || true
+          [ -z "${DISKS_JSON}" ] && continue
+          # Fingerprint = sorted disk serials — unique per physical machine.
+          # Two IPs on the same host (e.g. multi-NIC MS-A2) produce identical fingerprints.
+          FP=$(printf '%s' "${DISKS_JSON}" \
+            | jq -r 'select(.spec.serial != null) | .spec.serial' | sort | tr '\n' ',') || true
+          [ -z "${FP}" ] && continue
+          if ! echo "${FINGERPRINTS}" | grep -qF "${FP}"; then
+            FINGERPRINTS="${FINGERPRINTS}|${FP}"
+            MODELS=$(printf '%s' "${DISKS_JSON}" \
+              | jq -r 'select(.spec.model != null) | .spec.model' \
+              | sort -u | tr '\n' '|' | sed 's/|$//; s/|/ | /g') || true
+            if [ -z "${SUMMARY}" ]; then
+              SUMMARY=$(printf '    %-18s  %s' "${IP}" "${MODELS}")
+            else
+              SUMMARY=$(printf '%s\n    %-18s  %s' "${SUMMARY}" "${IP}" "${MODELS}")
+            fi
+            FOUND=$((FOUND + 1))
+          fi
+        done
+        printf '%s — %d/%d nodes ready\n' "$(date +%H:%M:%S)" "${FOUND}" "${EXPECTED}"
+        [ -n "${SUMMARY}" ] && printf '%s\n' "${SUMMARY}"
+        [ "${FOUND}" -ge "${EXPECTED}" ] && break
+        sleep 15
+      done
+    preconditions:
+      - test -f {{.TALOS_DIR}}/talconfig.yaml
+      - which nmap
+      - which jq
+      - which yq
+
+  wait-bootstrap:
+    desc: Wait (poll) until all nodes are Ready (then print kubectl get nodes -o wide)
+    silent: true
+    vars:
+      NODE_COUNT:
+        sh: yq '.nodes | length' {{.TALOS_DIR}}/talconfig.yaml
+    cmd: |
+      EXPECTED={{.NODE_COUNT}}
+      printf 'Waiting for %d node(s) to become Ready' "${EXPECTED}"
+      until
+        READY=$(kubectl get nodes --no-headers 2>/dev/null | awk '$2 == "Ready" {c++} END {print c+0}')
+        [ "${READY}" -ge "${EXPECTED}" ]
+      do
+        printf '.'; sleep 10
+      done
+      printf ' done\n'
+      kubectl get nodes -o wide
+    preconditions:
+      - test -f {{.ROOT_DIR}}/kubeconfig
+      - test -f {{.TALOS_DIR}}/talconfig.yaml
+      - which kubectl
+      - which yq
+
+  wipe-ceph-osds:
+    desc: Discover maintenance-mode nodes and wipe Ceph OSD disks (OSD list sourced from Rook helmrelease — no hardcoded models)
+    silent: true
+    vars:
+      ROOK_HELMRELEASE: '{{.ROOT_DIR}}/kubernetes/apps/rook-ceph/rook-ceph/cluster/app/helmrelease.yaml'
+    cmds:
+      - |
+        # Build OSD by-id basenames from the Rook helmrelease (authoritative source).
+        # Strips /dev/disk/by-id/ prefix; result is e.g. "nvme-CT2000T500SSD8_2545543A2190".
+        OSD_BYIDS=$(yq '.spec.values.cephClusterSpec.storage.nodes[].devices[].name' \
+          "{{.ROOK_HELMRELEASE}}" | sed 's|.*/||' | jq -Rn '[inputs]')
+        echo "OSD targets from helmrelease:"
+        printf '%s' "${OSD_BYIDS}" | jq -r '.[] | "  " + .'
+
+        echo "Discovering maintenance-mode nodes..."
+        MAINT_IPS=$(nmap -p 50000 --open -T4 10.60.0.0/24 -oG - 2>/dev/null \
+          | awk '/50000\/open/{print $2}')
+        if [ -z "${MAINT_IPS}" ]; then
+          echo "ERROR: no nodes in maintenance mode found" >&2; exit 1
+        fi
+
+        WIPED=0
+        WIPED_BYIDS=""
+        for IP in ${MAINT_IPS}; do
+          DISKS_JSON=$(talosctl get disks --nodes "${IP}" --insecure -o json 2>/dev/null)
+
+          # Construct the nvme by-id basename for each disk (spaces → underscores in model,
+          # matching the udev nvme-<MODEL>_<SERIAL> symlink format) and check against OSD list.
+          OSD_DEV=$(printf '%s' "${DISKS_JSON}" | jq -r \
+            --argjson ids "${OSD_BYIDS}" \
+            'select(.spec.model != null and .spec.serial != null) |
+             ("nvme-" + (.spec.model | gsub(" "; "_")) + "_" + .spec.serial) as $candidate |
+             select($ids | index($candidate) != null) |
+             .metadata.id' | head -1)
+          OSD_BYID=$(printf '%s' "${DISKS_JSON}" | jq -r \
+            --argjson ids "${OSD_BYIDS}" \
+            'select(.spec.model != null and .spec.serial != null) |
+             ("nvme-" + (.spec.model | gsub(" "; "_")) + "_" + .spec.serial) as $candidate |
+             select($ids | index($candidate) != null) |
+             $candidate' | head -1)
+
+          if [ -z "${OSD_DEV}" ]; then
+            echo "  ${IP}: no disk matched helmrelease OSD entries — skipping"
+            continue
+          fi
+
+          # Deduplicate by by-id basename: multi-NIC hosts (e.g. MS-A2) appear twice in nmap
+          # output but map to the same physical OSD — skip if already wiped this run.
+          if echo "${WIPED_BYIDS}" | grep -qF "${OSD_BYID}"; then
+            echo "  ${IP}: ${OSD_BYID} already wiped this run (duplicate IP for same host) — skipping"
+            continue
+          fi
+
+          echo "  ${IP}: wiping ${OSD_DEV} (${OSD_BYID})..."
+          # Pre-clear any LVM LVs on the device; kernel blocks raw writes to a device with dm-* slaves.
+          # If LVs won't clear, warn and skip — Rook OSD prepare runs ceph-volume lvm zap on first deploy.
+          for dm in $(printf '%s' "${DISKS_JSON}" | jq -r \
+            'select(.metadata.id | startswith("dm-")) | .metadata.id'); do
+            talosctl wipe disk --nodes "${IP}" --insecure "${dm}" 2>/dev/null || true
+          done
+          if talosctl wipe disk --nodes "${IP}" --insecure "${OSD_DEV}" 2>&1; then
+            WIPED=$((WIPED + 1))
+            WIPED_BYIDS="${WIPED_BYIDS}|${OSD_BYID}"
+          else
+            echo "  WARNING: ${IP} wipe blocked (LVM dm-* still active) — run 'task talos:wipe-ceph-osds-live' after bootstrap to finish cleanup"
+            WIPED_BYIDS="${WIPED_BYIDS}|${OSD_BYID}"
+          fi
+        done
+        echo "Done: ${WIPED} OSD disk(s) wiped."
+    preconditions:
+      - which talosctl
+      - which nmap
+      - which jq
+      - which yq
+      - test -f {{.ROOT_DIR}}/kubernetes/apps/rook-ceph/rook-ceph/cluster/app/helmrelease.yaml
+
+  wipe-ceph-osds-live:
+    desc: Wipe stale Ceph LVM via privileged pods on running OSD nodes (handles cases where maintenance-mode wipe was blocked by active dm-*)
+    silent: true
+    vars:
+      ROOK_HELMRELEASE: '{{.ROOT_DIR}}/kubernetes/apps/rook-ceph/rook-ceph/cluster/app/helmrelease.yaml'
+      WIPE_SCRIPT: '{{.ROOT_DIR}}/scripts/wipe-osd-lvm.sh'
+    cmds:
+      - |
+        NODE_COUNT=$(yq '.spec.values.cephClusterSpec.storage.nodes | length' "{{.ROOK_HELMRELEASE}}")
+        echo "Applying LVM wipe pods to ${NODE_COUNT} OSD node(s)..."
+
+        # Read the wipe script once; jq --arg handles all newline/quote escaping when
+        # embedding it into the JSON pod manifest, so no heredoc or inline quoting needed.
+        SCRIPT=$(cat "{{.WIPE_SCRIPT}}")
+
+        for i in $(seq 0 $((NODE_COUNT - 1))); do
+          NODE=$(yq ".spec.values.cephClusterSpec.storage.nodes[${i}].name" "{{.ROOK_HELMRELEASE}}")
+          DISK_BYID=$(yq ".spec.values.cephClusterSpec.storage.nodes[${i}].devices[0].name" "{{.ROOK_HELMRELEASE}}")
+          SHORT=$(echo "${NODE}" | sed 's/talos-//')
+          echo "  ${NODE}: ${DISK_BYID}"
+
+          # jq builds valid JSON from the shell variables (handles any embedded quotes/newlines).
+          # DISK_BYID is passed as a pod env var so the script doesn't need to be re-generated per node.
+          # hostNetwork: true is required so the kubelet skips the CNI call — without it pods stay
+          # Pending when this stage runs before Cilium is installed (nodes NotReady for networking).
+          jq -n \
+            --arg name      "wipe-osd-lvm-${SHORT}" \
+            --arg node      "${NODE}" \
+            --arg image     "quay.io/ceph/ceph:v19.2.3" \
+            --arg script    "${SCRIPT}" \
+            --arg disk_byid "${DISK_BYID}" \
+            '{
+              apiVersion: "v1", kind: "Pod",
+              metadata: {name: $name, namespace: "rook-ceph", labels: {app: "osd-lvm-wiper"}},
+              spec: {
+                restartPolicy: "Never", nodeName: $node, hostPID: true,
+                hostNetwork: true,
+                tolerations: [{operator: "Exists"}],
+                containers: [{
+                  name: "wipe", image: $image,
+                  command: ["bash", "-c", $script],
+                  env: [{name: "DISK_BYID", value: $disk_byid}],
+                  securityContext: {privileged: true},
+                  volumeMounts: [
+                    {name: "dev", mountPath: "/dev"},
+                    {name: "run", mountPath: "/run"}
+                  ]
+                }],
+                volumes: [
+                  {name: "dev", hostPath: {path: "/dev"}},
+                  {name: "run", hostPath: {path: "/run"}}
+                ]
+              }
+            }' | kubectl apply -f -
+        done
+
+        echo "Waiting for wipe pods to complete (up to 5m)..."
+        DEADLINE=$(($(date +%s) + 300))
+        while true; do
+          ACTIVE=$(kubectl get pods -n rook-ceph -l app=osd-lvm-wiper \
+            --no-headers 2>/dev/null \
+            | grep -cE 'Running|Pending|ContainerCreating' || true)
+          [ "${ACTIVE}" = "0" ] && break
+          [ "$(date +%s)" -gt "${DEADLINE}" ] && { echo "WARNING: timeout waiting for wipe pods"; break; }
+          sleep 5
+        done
+
+        echo "Results:"
+        FAILED=0
+        for i in $(seq 0 $((NODE_COUNT - 1))); do
+          NODE=$(yq ".spec.values.cephClusterSpec.storage.nodes[${i}].name" "{{.ROOK_HELMRELEASE}}")
+          SHORT=$(echo "${NODE}" | sed 's/talos-//')
+          PHASE=$(kubectl get pod -n rook-ceph "wipe-osd-lvm-${SHORT}" \
+            -o jsonpath='{.status.phase}' 2>/dev/null || echo "not-found")
+          if [ "${PHASE}" = "Succeeded" ]; then
+            echo "  ✓ ${NODE}"
+          else
+            echo "  ✗ ${NODE} (${PHASE})"
+            kubectl logs -n rook-ceph "wipe-osd-lvm-${SHORT}" 2>/dev/null | tail -5 || true
+            FAILED=$((FAILED + 1))
+          fi
+        done
+
+        kubectl delete pod -n rook-ceph -l app=osd-lvm-wiper --ignore-not-found
+        [ "${FAILED}" -gt 0 ] && \
+          echo "WARNING: ${FAILED} node(s) failed LVM cleanup — OSDs may not provision on those nodes" >&2
+        echo "Done: live OSD LVM wipe complete."
+    preconditions:
+      - which kubectl
+      - which jq
+      - which yq
+      - test -f {{.ROOT_DIR}}/kubernetes/apps/rook-ceph/rook-ceph/cluster/app/helmrelease.yaml
+      - test -f {{.ROOT_DIR}}/scripts/wipe-osd-lvm.sh
+
+  reset:
+    desc: Reset all nodes back to maintenance mode (DESTRUCTIVE — wipes Ceph OSD partitions after nodes come up in maintenance)
+    dir: '{{.TALOS_DIR}}'
+    prompt: This will destroy your cluster and wipe all Ceph OSD data, resetting all nodes to maintenance mode... continue?
+    cmds:
+      - talhelper gencommand reset --extra-flags="--reboot {{- if eq .CLI_FORCE false }} --system-labels-to-wipe STATE --system-labels-to-wipe EPHEMERAL{{ end }} --graceful=false --wait=false" | bash
+      - task: wait-maintenance
+      - task: wipe-ceph-osds
+    preconditions:
+      - which talhelper
+      - test -f {{.TALOSCONFIG}}
+
+  health:
+    desc: Check cluster health via talosctl
+    cmd: talosctl health
+    preconditions:
+      - test -f {{.TALOSCONFIG}}
+      - which talosctl

@@ -1,0 +1,70 @@
+---
+autoDirectNodeRoutes: true
+bpf:
+  masquerade: true
+  # Talos workaround: https://github.com/siderolabs/talos/issues/10002
+  hostLegacyRouting: true
+cgroup:
+  automount:
+    enabled: false
+  hostRoot: /sys/fs/cgroup
+# Bond layout (all nodes use bond-storage for storage after talconfig.yaml rename):
+#   cp-01/02: management=e1000e (single port), storage=bond-storage (ixgbe X520)
+#   cp-03:    management=bond0 (RTL8125+igc),  storage=bond-storage (i40e X710)
+# Cilium auto-detects the primary interface via the default route (management).
+# Uncomment and adjust if Cilium attaches to the wrong interface:
+# devices: bond+ enp+
+#
+# MTU must match the management NICs (1500), not the storage bond (9000): Cilium
+# attaches to the management interface above for all pod traffic, so a 9000 MTU
+# here made pods believe they could send 9000-byte frames over a path that's
+# actually capped at 1500 end-to-end. Any packet in between needs PMTUD (ICMP
+# fragmentation-needed) to recover, and that round-trip was silently failing —
+# small packets (e.g. plaintext pg_isready) worked while larger ones (e.g. the
+# mutual-TLS streaming_replica handshake between CNPG instances) intermittently
+# black-holed for minutes at a time before self-clearing. Rook-Ceph's jumbo
+# frames are unaffected: it uses host networking on bond-storage directly,
+# never the Cilium pod network this MTU governs.
+MTU: 1500
+endpointRoutes:
+  enabled: true
+ipam:
+  mode: kubernetes
+ipv4NativeRoutingCIDR: "10.42.0.0/16"
+k8sServiceHost: 127.0.0.1
+k8sServicePort: 7445
+kubeProxyReplacement: true
+kubeProxyReplacementHealthzBindAddr: 0.0.0.0:10256
+l2announcements:
+  enabled: true
+loadBalancer:
+  algorithm: maglev
+  mode: dsr
+localRedirectPolicy: true
+operator:
+  replicas: 1
+  rollOutPods: true
+rollOutCiliumPods: true
+routingMode: native
+securityContext:
+  capabilities:
+    ciliumAgent:
+      - CHOWN
+      - KILL
+      - NET_ADMIN
+      - NET_RAW
+      - IPC_LOCK
+      - SYS_ADMIN
+      - SYS_RESOURCE
+      - PERFMON
+      - BPF
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    cleanCiliumState:
+      - NET_ADMIN
+      - SYS_ADMIN
+      - SYS_RESOURCE
+socketLB:
+  hostNamespaceOnly: true

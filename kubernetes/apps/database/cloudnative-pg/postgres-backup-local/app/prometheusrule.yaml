@@ -1,0 +1,31 @@
+---
+# yaml-language-server: $schema=https://kubernetes-schemas.pages.dev/monitoring.coreos.com/prometheusrule_v1.json
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: postgres-backup-local-rules
+spec:
+  groups:
+    - name: postgres-backup-local.rules
+      rules:
+        - alert: PostgresBackupMissed
+          # Dead man's switch: fires if no successful backup in 25 hours, or if the cronjob
+          # disappears entirely. Uses kube-state-metrics kube_cronjob_status_last_successful_time.
+          expr: |
+            absent(kube_cronjob_status_last_successful_time{namespace="database",cronjob="postgres-backup-local"})
+            or (time() - kube_cronjob_status_last_successful_time{namespace="database",cronjob="postgres-backup-local"}) > 90000
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: Postgres daily backup has not succeeded in over 25 hours.
+        - alert: PostgresBackupJobFailed
+          # Fires when the most recently completed backup job has at least one failure.
+          # Auto-resolves when the failed Job object is garbage-collected (failedJobsHistory: 1).
+          expr: |
+            kube_job_status_failed{namespace="database",job_name=~"postgres-backup-local-.*"} > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: A postgres-backup-local job has recorded a failure.

@@ -1,0 +1,42 @@
+---
+installCRDs: true
+# 2 replicas + topology spread: pre-places one pod per two nodes so a cp-03 failure causes
+# zero downtime. ESO runs in concurrent mode (no leader election — verified: no Lease objects,
+# no --enable-leader-election flag) — both replicas are always active simultaneously and writes
+# to Kubernetes Secrets are idempotent. Trade-off: doubles API calls to 1Password Connect.
+# All three components share app.kubernetes.io/instance: external-secrets, giving the scheduler
+# a 6-pod group (3 components x 2 replicas) that targets a clean 2/2/2 split across 3 nodes.
+replicaCount: 2
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+    matchLabelKeys:
+      - pod-template-hash
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/instance: external-secrets
+webhook:
+  # Webhook is an HTTP admission server — both replicas serve simultaneously.
+  # A node failure causes zero admission downtime with 2 replicas pre-placed.
+  replicaCount: 2
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      matchLabelKeys:
+        - pod-template-hash
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/instance: external-secrets
+certController:
+  replicaCount: 2
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      matchLabelKeys:
+        - pod-template-hash
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/instance: external-secrets

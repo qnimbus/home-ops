@@ -1,0 +1,172 @@
+---
+# yaml-language-server: $schema=https://schemas.clustrs.dev/kustomize.toolkit.fluxcd.io/kustomization_v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: cluster-meta
+  namespace: &namespace flux-system
+spec:
+  interval: 1h
+  path: ./kubernetes/flux/meta
+  prune: true
+  retryInterval: 2m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+    namespace: flux-system
+  targetNamespace: *namespace
+  wait: true
+---
+# yaml-language-server: $schema=https://schemas.clustrs.dev/kustomize.toolkit.fluxcd.io/kustomization_v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: cluster-vars
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: cluster-meta
+      namespace: flux-system
+  decryption:
+    provider: sops
+    secretRef:
+      name: sops-age
+  interval: 1h
+  path: ./kubernetes/flux/vars
+  prune: true
+  retryInterval: 2m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+    namespace: flux-system
+  targetNamespace: flux-system
+  wait: true
+---
+# yaml-language-server: $schema=https://schemas.clustrs.dev/kustomize.toolkit.fluxcd.io/kustomization_v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: cluster-apps
+  namespace: flux-system
+spec:
+  decryption:
+    provider: sops
+    secretRef:
+      name: sops-age
+  dependsOn:
+    - name: cluster-meta
+      namespace: flux-system
+    - name: cluster-vars
+      namespace: flux-system
+  interval: 1h
+  path: ./kubernetes/apps
+  prune: true
+  retryInterval: 2m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+    namespace: flux-system
+  timeout: 5m
+  wait: false
+  patches:
+    - patch: |-
+        apiVersion: kustomize.toolkit.fluxcd.io/v1
+        kind: Kustomization
+        metadata:
+          name: not-used
+        spec:
+          decryption:
+            provider: sops
+            secretRef:
+              name: sops-age
+          postBuild:
+            substituteFrom:
+              - name: cluster-settings
+                kind: ConfigMap
+                optional: true
+              - name: cluster-secrets
+                kind: Secret
+                optional: true
+      target:
+        group: kustomize.toolkit.fluxcd.io
+        kind: Kustomization
+        labelSelector: substitution.flux.home.arpa/disabled notin (true)
+    - patch: |-
+        apiVersion: kustomize.toolkit.fluxcd.io/v1
+        kind: Kustomization
+        metadata:
+          name: not-used
+        spec:
+          retryInterval: 2m
+          timeout: 5m
+      target:
+        group: kustomize.toolkit.fluxcd.io
+        kind: Kustomization
+    # Drift detection default — opt out per-release with label:
+    #   drift-detection.flux.home.arpa/disabled: "true"
+    # Add spec.driftDetection.ignore rules to the HelmRelease for paths
+    # managed by other controllers (e.g. HPA → /spec/replicas, VPA → resources).
+    # Both HelmRelease-defaults and drift-detection patches are in one block so
+    # Kustomize list-replace semantics don't drop one in favour of the other.
+    - patch: |-
+        apiVersion: kustomize.toolkit.fluxcd.io/v1
+        kind: Kustomization
+        metadata:
+          name: not-used
+        spec:
+          patches:
+            - patch: |-
+                apiVersion: helm.toolkit.fluxcd.io/v2
+                kind: HelmRelease
+                metadata:
+                  name: not-used
+                spec:
+                  install:
+                    crds: CreateReplace
+                    # RetryOnFailure retries the Helm install in-place (faster than
+                    # uninstall+reinstall between attempts). After 1 retry Flux
+                    # uninstalls the failed release (remediateLastFailure) so the
+                    # next reconciliation starts clean.
+                    # On persistent failure: check the failure reason with
+                    #   flux logs --kind=HelmRelease --name=<name> -n <namespace>
+                    # then fix values or the chart version and push — Flux retries
+                    # on the next interval, or trigger immediately with:
+                    #   flux reconcile helmrelease <name> -n <namespace>
+                    strategy:
+                      name: RetryOnFailure
+                    remediation:
+                      retries: 1
+                      remediateLastFailure: true
+                  timeout: 15m
+                  upgrade:
+                    cleanupOnFail: true
+                    crds: CreateReplace
+                    # RetryOnFailure retries the upgrade in-place up to 3 times.
+                    # On exhaustion Flux rolls back to the previous release revision
+                    # (remediateLastFailure + rollback) and marks the HelmRelease
+                    # failed. Fix the issue and push, or force a retry with:
+                    #   flux reconcile helmrelease <name> -n <namespace>
+                    strategy:
+                      name: RetryOnFailure
+                    remediation:
+                      remediateLastFailure: true
+                      retries: 3
+                      strategy: rollback
+              target:
+                group: helm.toolkit.fluxcd.io
+                kind: HelmRelease
+            - patch: |-
+                apiVersion: helm.toolkit.fluxcd.io/v2
+                kind: HelmRelease
+                metadata:
+                  name: not-used
+                spec:
+                  driftDetection:
+                    mode: enabled
+              target:
+                group: helm.toolkit.fluxcd.io
+                kind: HelmRelease
+                labelSelector: drift-detection.flux.home.arpa/disabled notin (true)
+      target:
+        group: kustomize.toolkit.fluxcd.io
+        kind: Kustomization

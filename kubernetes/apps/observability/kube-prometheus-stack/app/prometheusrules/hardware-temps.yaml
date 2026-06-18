@@ -1,0 +1,111 @@
+---
+# yaml-language-server: $schema=https://schemas.clustrs.dev/monitoring.coreos.com/prometheusrule_v1.json
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: hardware-temperatures
+  namespace: observability
+spec:
+  groups:
+    - name: hardware.temperatures
+      # 15s eval interval (was 30s): pairs with the 10s node-exporter scrape so the
+      # critical board/VRM alert fires within ~30s of crossing the threshold rather
+      # than up to ~60s. Cheap (6 rules) and generically useful for the CPU/NVMe alerts
+      # too — KEEP after the cp-02 diagnostic work concludes; it is not diagnostic-only.
+      interval: 15s
+      rules:
+        # ── CPU temperature (Intel + AMD) ─────────────────────────────────────
+        # node-exporter derives the `chip` label from the hwmon DEVICE PATH, not the
+        # kernel `name` file — so the real labels are "platform_coretemp_0" (Intel,
+        # sensor temp1 = Package id 0) and "pci0000:00_0000:00:18_3" (AMD k10temp,
+        # sensor temp1 = Tctl, +offset baked in). The previous `coretemp.*|k10temp.*`
+        # selector matched NOTHING (PromQL =~ is fully anchored; both labels start with
+        # a different prefix) so these alerts silently never fired — fixed 2026-06-10.
+        # Verify with: node_hwmon_sensor_label (joins chip+sensor -> human label).
+        - alert: NodeCpuTemperatureWarning
+          expr: |
+            node_hwmon_temp_celsius{chip=~"platform_coretemp_0|pci0000:00_0000:00:18_3", sensor="temp1"} > 80
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: High CPU temperature on {{ $labels.instance }}
+            description: >-
+              CPU temperature is {{ $value | printf "%.0f" }}°C on {{ $labels.instance }}
+              (chip: {{ $labels.chip }}). Normal range < 80°C.
+              AMD Tctl includes a +10°C offset over actual die temp.
+
+        - alert: NodeCpuTemperatureCritical
+          expr: |
+            node_hwmon_temp_celsius{chip=~"platform_coretemp_0|pci0000:00_0000:00:18_3", sensor="temp1"} > 90
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: Critical CPU temperature on {{ $labels.instance }}
+            description: >-
+              CPU temperature is {{ $value | printf "%.0f" }}°C on {{ $labels.instance }}
+              (chip: {{ $labels.chip }}). Immediate attention required.
+
+        # ── NVMe composite temperature ─────────────────────────────────────────
+        # sensor="temp1" is the composite (highest of all NVMe sensors).
+        # 65°C warning / 75°C critical — NVMe spec allows up to 70–85°C depending
+        # on the drive, but sustained operation above 65°C degrades longevity.
+        - alert: NodeNvmeTemperatureWarning
+          expr: |
+            node_hwmon_temp_celsius{chip=~"nvme.*", sensor="temp1"} > 65
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: High NVMe temperature on {{ $labels.instance }}
+            description: >-
+              NVMe composite temperature is {{ $value | printf "%.0f" }}°C on
+              {{ $labels.instance }} (chip: {{ $labels.chip }}).
+
+        - alert: NodeNvmeTemperatureCritical
+          expr: |
+            node_hwmon_temp_celsius{chip=~"nvme.*", sensor="temp1"} > 75
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: Critical NVMe temperature on {{ $labels.instance }}
+            description: >-
+              NVMe composite temperature is {{ $value | printf "%.0f" }}°C on
+              {{ $labels.instance }} (chip: {{ $labels.chip }}).
+
+        # ── Board / PCH (VRM-adjacent) temperature — Lenovo M920Q only ─────────
+        # nct6683 "PCH CHIP" channel: node-exporter chip="platform_nct6683_2592",
+        # sensor="temp2" (the kernel `name` file says nct6686, but node-exporter's
+        # chip label is derived from the device path — verified live). This is the
+        # channel that ran away to 72°C before the 2026-06-01 BIOS thermal shutdown
+        # on cp-02: the CPU die throttled and recovered, but this board/VRM-area
+        # sensor kept climbing until the BIOS cut power on the *board* temperature,
+        # not the die. Only present on the two M920Q nodes (cp-01/cp-02) — cp-03
+        # (AMD) has no nct6683. Idle ~40-46°C. See ROADMAP → cp-02 Thermal Stability.
+        - alert: NodeVRMTemperatureHigh
+          expr: |
+            node_hwmon_temp_celsius{chip="platform_nct6683_2592", sensor="temp2"} > 65
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: Board/PCH temperature high on {{ $labels.instance }}
+            description: >-
+              nct6683 PCH/board sensor is {{ $value | printf "%.0f" }}°C on
+              {{ $labels.instance }}. This is the channel that preceded the
+              2026-06-01 thermal shutdown; the BIOS hardware VRM trip sits ~72-75°C.
+
+        - alert: NodeVRMTemperatureCritical
+          expr: |
+            node_hwmon_temp_celsius{chip="platform_nct6683_2592", sensor="temp2"} > 72
+          for: 30s
+          labels:
+            severity: critical
+          annotations:
+            summary: Board/PCH temperature near thermal-shutdown threshold on {{ $labels.instance }}
+            description: >-
+              nct6683 PCH/board sensor is {{ $value | printf "%.0f" }}°C on
+              {{ $labels.instance }} — at/above the ~72°C board temperature that
+              tripped the BIOS hardware shutdown on 2026-06-01. Intervene now.

@@ -1,0 +1,16 @@
+---
+# yaml-language-server: $schema=https://schemas.clustrs.dev/source.toolkit.fluxcd.io/ocirepository_v1.json
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: spegel
+  namespace: flux-system
+spec:
+  interval: 1h
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: copy
+  url: oci://ghcr.io/spegel-org/helm-charts/spegel
+  ref:
+    # renovate: datasource=docker depName=ghcr.io/spegel-org/helm-charts/spegel
+    tag: "0.7.1"

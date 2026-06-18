@@ -1,0 +1,144 @@
+---
+instance:
+  distribution:
+    # renovate: datasource=github-releases depName=fluxcd/flux2
+    version: v2.8.8
+  cluster:
+    size: medium
+  components:
+    - source-controller
+    - kustomize-controller
+    - helm-controller
+    - notification-controller
+  sync:
+    kind: GitRepository
+    provider: github
+    interval: 5m0s
+    url: "https://github.com/qnimbus/home-lab"
+    ref: refs/heads/main
+    path: ./kubernetes/flux/cluster
+    pullSecret: flux-github-app
+  commonMetadata:
+    labels:
+      app.kubernetes.io/name: flux
+  kustomize:
+    patches:
+      - patch: |
+          - op: add
+            path: /spec/template/spec/containers/0/args/-
+            value: --concurrent=10
+          - op: add
+            path: /spec/template/spec/containers/0/args/-
+            value: --requeue-dependency=5s
+        target:
+          kind: Deployment
+          name: (helm-controller|source-controller)
+      - patch: |
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: all
+          spec:
+            template:
+              spec:
+                containers:
+                  - name: manager
+                    resources:
+                      limits:
+                        memory: 1Gi
+        target:
+          kind: Deployment
+          name: (kustomize-controller|helm-controller|source-controller)
+      # kustomize-controller runs at a higher concurrency than helm-controller/source-controller
+      # (more Kustomizations than HelmReleases in this repo, and dependency-chain unblocking
+      # benefits most from extra parallelism) — kept in one patch so the effective value is
+      # explicit rather than the result of two patches landing in a particular list order.
+      - patch: |
+          - op: add
+            path: /spec/template/spec/containers/0/args/-
+            value: --concurrent=20
+          - op: add
+            path: /spec/template/spec/containers/0/args/-
+            value: --requeue-dependency=5s
+          - op: replace
+            path: /spec/template/spec/volumes/0
+            value:
+              name: temp
+              emptyDir:
+                medium: Memory
+        target:
+          kind: Deployment
+          name: kustomize-controller
+      - patch: |
+          - op: add
+            path: /spec/template/spec/containers/0/args/-
+            value: --helm-cache-max-size=10
+          - op: add
+            path: /spec/template/spec/containers/0/args/-
+            value: --helm-cache-ttl=60m
+          - op: add
+            path: /spec/template/spec/containers/0/args/-
+            value: --helm-cache-purge-interval=5m
+        target:
+          kind: Deployment
+          name: source-controller
+      - patch: |
+          - op: add
+            path: /spec/template/spec/containers/0/args/-
+            value: --feature-gates=OOMWatch=true
+          - op: add
+            path: /spec/template/spec/containers/0/args/-
+            value: --oom-watch-memory-threshold=95
+          - op: add
+            path: /spec/template/spec/containers/0/args/-
+            value: --oom-watch-interval=500ms
+        target:
+          kind: Deployment
+          name: helm-controller
+      - patch: |
+          - op: add
+            path: /spec/template/spec/containers/0/args/-
+            value: --feature-gates=DisableChartDigestTracking=true
+        target:
+          kind: Deployment
+          name: helm-controller
+      # Inject shared pod label onto the three scalable controllers only so they form one
+      # 6-pod group (3 x 2 replicas) for topology spread. Scoped to these three by name:
+      # source-controller cannot run 2 Ready replicas (artifact server only starts on leader);
+      # flux-operator manages the FluxInstance CR and has no HA value. Including either in the
+      # label group would skew the per-node count before the constrained pods are placed and
+      # would cause DoNotSchedule to block valid placements.
+      - patch: |
+          - op: add
+            path: /spec/template/metadata/labels/app.kubernetes.io~1part-of
+            value: flux
+        target:
+          kind: Deployment
+          name: (helm-controller|kustomize-controller|notification-controller)
+      # Scale to 2 replicas: pre-places one pod per two nodes so a single node failure
+      # triggers leader-election failover (~35 s lease duration) instead of pod rescheduling
+      # (~5-6 min). source-controller and flux-operator excluded — see label patch above.
+      - patch: |
+          - op: replace
+            path: /spec/replicas
+            value: 2
+        target:
+          kind: Deployment
+          name: (helm-controller|kustomize-controller|notification-controller)
+      # Spread the 6 scalable Flux controller pods (3 controllers x 2 replicas) across 3 nodes.
+      # ScheduleAnyway (soft) keeps controllers running through single-node upgrade reboots —
+      # DoNotSchedule would leave helm-controller and notification-controller Pending for the
+      # entire ~80-minute reboot window on every Talos/K8s upgrade, stalling reconciliation.
+      - patch: |
+          - op: add
+            path: /spec/template/spec/topologySpreadConstraints
+            value:
+              - maxSkew: 1
+                topologyKey: kubernetes.io/hostname
+                whenUnsatisfiable: ScheduleAnyway
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/part-of: flux
+        target:
+          kind: Deployment
+          name: (helm-controller|kustomize-controller|notification-controller)

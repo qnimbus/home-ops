@@ -1,0 +1,11 @@
+# Talos Image Factory schematic — https://factory.talos.dev
+# Run ./scripts/bootstrap.sh iso to auto-register and download the factory ISO.
+# The factory ISO embeds extensions at boot time; the standard ISO does not.
+customization:
+  systemExtensions:
+    officialExtensions:
+      - siderolabs/intel-ucode        # CPU microcode — loads only on Intel nodes (M920Q)
+      - siderolabs/amd-ucode          # CPU microcode — loads only on AMD nodes (MS-A2)
+      - siderolabs/iscsi-tools        # Required for Longhorn iSCSI initiator
+      - siderolabs/util-linux-tools   # Provides lsblk, blkid for storage debugging
+      # - siderolabs/i915-ucode       # Intel GPU firmware (optional for headless servers)

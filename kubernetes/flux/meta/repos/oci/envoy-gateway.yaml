@@ -1,0 +1,16 @@
+---
+# yaml-language-server: $schema=https://schemas.clustrs.dev/source.toolkit.fluxcd.io/ocirepository_v1.json
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: envoy-gateway
+  namespace: flux-system
+spec:
+  interval: 1h
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: copy
+  url: oci://docker.io/envoyproxy/gateway-helm
+  ref:
+    # renovate: datasource=docker depName=docker.io/envoyproxy/gateway-helm extractVersion=^v(?<version>.*)$
+    tag: "v1.8.0"

@@ -1,0 +1,108 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/helmfile
+
+# ## CRD Pre-Bootstrap Phase
+#
+# This file runs BEFORE the main app bootstrap (01-apps.yaml) and BEFORE Flux
+# reconciles anything from Git.  Its sole job is to install CustomResourceDefinition
+# objects from charts that are not part of the Helmfile app bootstrap but whose CRDs
+# are referenced by raw Kubernetes manifests that live in Flux Kustomization paths.
+#
+# ### Why this exists
+#
+# Flux's kustomize-controller performs a *dry-run* (server-side apply validation)
+# against every resource in a Kustomization path before applying any of them.  If a
+# resource uses a CRD that does not yet exist on the API server, the dry-run fails
+# with:
+#
+#   no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"
+#   ensure CRDs are installed first
+#
+# …and the entire Kustomization is rejected.  This happens even if the CRD is
+# "coming soon" from another Flux-managed chart, because dry-run happens at apply
+# time — there is no way to express "apply this resource only if the CRD exists".
+#
+# ### The two affected CRD groups in this cluster
+#
+# | API Group                    | Kinds                                   | Installed by chart      |
+# |------------------------------|-----------------------------------------|-------------------------|
+# | monitoring.coreos.com/v1     | ServiceMonitor, PodMonitor, PrometheusRule | kube-prometheus-stack |
+# | gateway.networking.k8s.io/v1 | Gateway, GatewayClass, HTTPRoute, …     | envoy-gateway           |
+#
+# These charts are NOT in the app-bootstrap Helmfile (01-apps.yaml) — they are
+# managed entirely by Flux after bootstrap.  Without this file, any Kustomization
+# that contains a raw ServiceMonitor or HTTPRoute manifest fails on a fresh cluster
+# and stays failed until kube-prometheus-stack / envoy-gateway is eventually deployed
+# by Flux.  Because Flux's *HelmRelease* remediation has a finite retry count (unlike
+# Kustomizations, which retry indefinitely), some of those failures become permanent.
+#
+# ### How the post-renderer filter works
+#
+# This file is consumed via `helmfile template --quiet | kubectl apply --server-side`
+# (see the `bootstrap:apps` task).  Helmfile renders each chart via `helm template`
+# with the post-renderer below, which filters the output to CRDs only.  The result
+# is piped directly to kubectl — no Helm release Secret is written, no namespace is
+# required to exist beforehand.
+#
+# Full pipeline (see bootstrap:apps task):
+#
+#   helmfile template --quiet \
+#   | yq ea 'select(.kind == "CustomResourceDefinition")' \
+#   | kubectl apply --server-side -f -
+#
+# `--include-crds`   — Helm normally omits CRDs from `template` output; this forces
+#                      them in so the yq filter has something to select.
+# `--no-hooks`       — skip hook manifests (Jobs, etc.) — not needed for CRD extract.
+# `yq ea 'select'`   — filters the combined output to CRDs only (moved to the task
+#                      pipeline — Helm 4 post-renderers require a registered plugin,
+#                      not an arbitrary executable).
+# `--server-side`    — uses server-side apply, which is idempotent and handles CRD
+#                      schema updates (e.g. re-bootstrap after a chart upgrade) safely.
+#
+# ### Version pinning and Renovate
+#
+# Each chart version here MUST match the version in the corresponding
+# `kubernetes/flux/meta/repos/oci/<chart>.yaml` OCIRepository (the Flux-managed
+# source used for day-2 upgrades).  Both files carry identical `# renovate:` comments
+# so Renovate bumps them together in the same PR.  If you manually edit a version
+# here, update the OCIRepository too, or the CRDs will diverge from the deployed
+# chart version.
+#
+# ### What NOT to add here
+#
+# Do NOT add charts whose CRDs are managed through the existing Flux `dependsOn`
+# pattern (e.g. rook-ceph CRDs are consumed only by rook-ceph-cluster, which
+# correctly depends on rook-ceph-operator).  Only add a chart here when its CRDs
+# are referenced by a Kustomization that should have NO runtime dependency on the
+# chart itself (i.e. monitoring manifests inside functional app paths, HTTPRoutes
+# inside app dirs that deploy before the gateway is live).
+
+helmDefaults:
+  cleanupOnFail: true
+  wait: true
+  waitForJobs: true
+  args:
+    - --include-crds
+    - --no-hooks
+
+releases:
+  # Installs: ServiceMonitor, PodMonitor, PrometheusRule, Alertmanager, and related
+  # monitoring.coreos.com/v1 CRDs.  Required because multiple app Kustomization
+  # paths (flux-instance, envoy-gateway, cloudnative-pg, rook-ceph-operator, etc.)
+  # embed raw ServiceMonitor/PodMonitor/PrometheusRule manifests alongside their
+  # functional resources.
+  - name: kube-prometheus-stack-crds
+    namespace: observability
+    chart: oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack
+    # renovate: datasource=docker depName=ghcr.io/prometheus-community/charts/kube-prometheus-stack
+    version: "86.1.0"
+
+  # Installs: Gateway, GatewayClass, HTTPRoute, GRPCRoute, TCPRoute, and all other
+  # gateway.networking.k8s.io/v1 (Kubernetes Gateway API) CRDs.  Required because
+  # app Kustomization paths (flux-receiver, and any app with an httproute.yaml) embed
+  # raw HTTPRoute/Gateway manifests that fail dry-run before envoy-gateway is deployed.
+  - name: envoy-gateway-crds
+    namespace: network
+    chart: oci://docker.io/envoyproxy/gateway-helm
+    # renovate: datasource=docker depName=docker.io/envoyproxy/gateway-helm extractVersion=^v(?<version>.*)$
+    version: "v1.8.0"

@@ -1,0 +1,33 @@
+---
+# Cap the EPHEMERAL partition so container image layers, emptyDir volumes, and
+# containerd's layer cache cannot consume the full system disk. Without this,
+# EPHEMERAL grows to fill all remaining space after STATE (~1 GB), leaving no
+# room for a dedicated workload-data partition.
+#
+# Applied only to nodes with 1 TB system disks. cp-01 (128 GB AirDisk) is
+# intentionally excluded — see talconfig.yaml for the planned upgrade note.
+apiVersion: v1alpha1
+kind: VolumeConfig
+name: EPHEMERAL
+provisioning:
+  diskSelector:
+    match: system_disk   # CEL: true for the disk Talos booted and installed from
+  maxSize: 120GiB
+---
+# Create a dedicated partition for OpenEBS LocalPV (openebs-hostpath StorageClass).
+# Isolating workload PVC data from EPHEMERAL means container image churn cannot
+# trigger nodefs.available eviction of workload pods, and a runaway container
+# cannot fill the LocalPV partition (and vice versa).
+#
+# grow: true fills all remaining space after EPHEMERAL is capped (~810 GiB on a
+# 1 TB drive). minSize documents the minimum useful floor; the partition grows
+# well beyond it in practice. No maxSize — the system disk is used exclusively
+# for boot + workload data, so unallocated headroom would be permanently wasted.
+apiVersion: v1alpha1
+kind: UserVolumeConfig
+name: local-hostpath
+provisioning:
+  diskSelector:
+    match: system_disk
+  minSize: 100GiB
+  grow: true

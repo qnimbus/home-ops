@@ -1,0 +1,20 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+configMapGenerator:
+  - name: kube-prometheus-stack-values
+    namespace: observability
+    files:
+      - values.yaml=./helm/values.yaml
+generatorOptions:
+  labels:
+    reconcile.fluxcd.io/watch: "Enabled"
+configurations:
+  - ./helm/kustomizeconfig.yaml
+resources:
+  - ./namespace.yaml
+  - ./helmrelease.yaml
+  - ./httproute.yaml
+  - ./externalsecret.yaml
+  - ./prometheusrules

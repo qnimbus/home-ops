@@ -1,0 +1,104 @@
+machine:
+  kubelet:
+    # ── Runtime seccomp default ───────────────────────────────────────────────
+    # Applies the `RuntimeDefault` seccomp profile to any pod that does not
+    # explicitly set `securityContext.seccompProfile`. RuntimeDefault is the
+    # container runtime's built-in syscall allowlist — it blocks ~300 rarely-used
+    # syscalls (ptrace, mount, kexec_load, etc.) that are not needed by most
+    # workloads but are commonly exploited in container escapes.
+    #
+    # In practice, well-maintained Helm charts already declare their seccomp
+    # profile; this setting only affects charts that omit it. The cost is near
+    # zero: RuntimeDefault adds no measurable overhead on modern kernels. Any
+    # workload that legitimately needs a broader syscall surface can opt out
+    # with `seccompProfile.type: Unconfined` in its pod spec.
+    defaultRuntimeSeccompProfileEnabled: true
+
+    # ── Static pod manifests directory ───────────────────────────────────────
+    # Talos manages all control-plane components (kube-apiserver, etcd, etc.)
+    # as Talos services — NOT as static pod manifests under /etc/kubernetes/manifests.
+    # Leaving the manifests directory enabled means the kubelet watches an empty
+    # directory on every node. Disabling it removes the inotify watch and the
+    # startup reconciliation loop, which shaves a small amount from node boot
+    # time and eliminates a source of spurious "no objects found" log noise.
+    disableManifestsDirectory: true
+
+    extraConfig:
+      # ── Feature gates ─────────────────────────────────────────────────────
+      featureGates:
+        # ImageVolume — allows pods to reference OCI image layers directly as
+        # read-only volumes without pulling the image into the container runtime
+        # layer cache. Useful for data-distribution workloads (model weights,
+        # static assets) where the same image is mounted by many pods without
+        # each needing a running container. Kubernetes 1.33+ feature.
+        ImageVolume: true
+
+        # ResourceHealthStatus — adds a per-resource health condition to Node
+        # status. Instead of a single opaque `Ready: false`, the kubelet emits
+        # specific conditions for memory, CPU, and storage subsystems. Makes
+        # root-cause analysis faster: `kubectl describe node` shows WHICH
+        # resource is unhealthy rather than requiring you to dig through logs.
+        ResourceHealthStatus: true
+
+      # Parallel image pulls — default is true (serialised). On nodes running
+      # many pods (30+ per node on this cluster), serialising pulls creates a
+      # queue where a large image blocks all other pods from starting. Disabling
+      # serialisation lets containerd pull multiple images concurrently, which
+      # is safe on NVMe storage and high-bandwidth uplinks.
+      serializeImagePulls: false
+
+      # Raise the pod ceiling from the default 110. The cluster currently runs
+      # 30+ pods per node; with future workloads (Grafana, databases, etc.) 110
+      # leaves little headroom. 250 matches common homelab/small-cluster
+      # recommendations and is well within kernel and CNI limits at this node count.
+      maxPods: 250
+
+      # ── Eviction thresholds ──────────────────────────────────────────────────
+      # evictionHard tells the kubelet to proactively evict the lowest-priority
+      # pods when the node approaches these limits — before the Linux OOM-killer
+      # fires. On control-plane nodes this matters more than on workers: etcd,
+      # kube-apiserver, kube-controller-manager, and kube-scheduler all run here
+      # as static pods. An OOM-kill of etcd causes data inconsistency risk and
+      # requires manual recovery; proactive eviction of a workload pod is far
+      # cheaper. The kubelet default for memory.available is only 100 MiB
+      # (0.15% of 64 GiB) — too thin a margin for nodes under sustained load.
+      evictionHard:
+        # Begin evicting Burstable/BestEffort pods when free memory drops below
+        # 500 MiB. At 64 GiB (cp-01/cp-02) this is ~0.8%; at 92 GiB (cp-03)
+        # it is ~0.5%. Conservative enough to avoid spurious evictions under
+        # normal load, aggressive enough to protect etcd under memory pressure.
+        memory.available: "500Mi"
+        # Standard 10% disk threshold — evict pods writing ephemeral data when
+        # the system disk (EPHEMERAL partition, shared with container image
+        # layers) has less than 10% free. Matches the kubelet default but
+        # declared explicitly so it survives Kubernetes version changes.
+        nodefs.available: "10%"
+
+      # ── Resource reservations ────────────────────────────────────────────────
+      # These carve out capacity from "allocatable" so the scheduler accounts
+      # for them and the kubelet enforces cgroup limits for each bucket.
+      # Note: reservations protect the kubelet + runtime (kubeReserved) and OS
+      # services (systemReserved). Static pods (kube-apiserver, etcd, etc.) are
+      # NOT covered here — they draw from the allocatable pool like any pod.
+      #
+      # kubeReserved: memory for kubelet (~200 MiB) + containerd (~300 MiB)
+      # under moderate container churn. CPU reservation is minimal; kubelet and
+      # containerd are not CPU-intensive during steady-state operation.
+      kubeReserved:
+        cpu: "200m"
+        memory: "512Mi"
+      # systemReserved: memory for Talos system services (machined, apid, etc.)
+      # and kernel overhead. 500 MiB is a reasonable floor for a lightly-loaded
+      # Talos node; the kernel itself typically uses 200–400 MiB at rest.
+      systemReserved:
+        cpu: "250m"
+        memory: "500Mi"
+
+    # Pin the kubelet's node IP to the management subnet. Without this, on nodes
+    # with multiple interfaces (storage bond on 10.200.x.x, management on
+    # 10.60.x.x), the kubelet may register with a storage-network IP, causing
+    # kube-apiserver ↔ kubelet communication (log streaming, exec, port-forward)
+    # to route over the storage bond instead of the management interface.
+    nodeIP:
+      validSubnets:
+        - "10.60.0.0/24"   # management subnet; see nodeSubnet in talenv.yaml

@@ -1,0 +1,290 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/budimanjojo/talhelper/master/pkg/config/schemas/talconfig.json
+---
+clusterName: kubernetes
+
+talosVersion: "${talosVersion}"
+kubernetesVersion: "${kubernetesVersion}"
+
+endpoint: https://${clusterEndpoint}:6443
+additionalApiServerCertSans: &sans
+  - "127.0.0.1"
+  - "${clusterEndpoint}"
+additionalMachineCertSans: *sans
+
+clusterPodNets: ["10.42.0.0/16"]
+clusterSvcNets: ["10.43.0.0/16"]
+
+# Disable built-in CNI — Cilium will be installed via GitOps
+cniConfig:
+  name: none
+
+nodes:
+  - hostname: "talos-worker-01"                     # Lenovo M920Q #1 (i5-8500T CPU @ 2.10GHz, 64GB, X520-DA2) — temporary CP until M90q #2 joins; then pure worker
+    ipAddress: "10.60.0.204"
+    installDiskSelector:
+      model: "IRP-SSDPR-P44N-01T-30"                # GoodRam IRDM PRO NANO — system disk; Kingston SNV3S1000G is Ceph OSD
+    machineSpec:
+      secureboot: false
+    talosImageURL: "${talosImageURL}"
+    controlPlane: false
+    patches:
+      - "@./patches/node/machine-volumes-1tb.yaml"
+    nodeLabels:
+      topology.kubernetes.io/region: &region homelab
+      topology.kubernetes.io/zone: homelab-worker-01
+    networkInterfaces:
+      # Management — single Intel I219-LM RJ45 (driver: e1000e)
+      # VLAN 60 (management) is native/untagged on the switch port; address configured
+      # directly on the physical interface. Native VLAN 100 for Intel AMT is handled
+      # by the ME firmware before frames reach Talos.
+      - deviceSelector:
+          driver: e1000e
+        dhcp: false
+        addresses:
+          - "10.60.0.204/24"
+        routes:
+          - network: "0.0.0.0/0"
+            gateway: "10.60.0.1"
+        mtu: 1500
+        # No VIP — worker nodes do not participate in kube-vip ARP election
+      # Storage — LACP bond of 2x SFP+ ports (Intel X520-DA2, enp1s0f0 + enp1s0f1)
+      # hardwareAddr selectors are used rather than name: because talhelper only generates
+      # LinkAliasConfig documents (required for bond member enslavement) for hardwareAddr/driver
+      # selectors. The alias controller emits a transient "matched multiple links" warning after
+      # LACP propagates the bond MAC to both slaves — this is cosmetic only; bonds form correctly.
+      # bond-storage: consistent name across all 3 nodes — retained as the storage-VLAN fabric
+      # for Rook-Ceph (cluster_network on hostNetwork OSDs). The /24 connected route below is all
+      # that's needed; the old per-node /28 cross-node routes (for whereabouts ipvlan-L3) are gone.
+      - interface: bond-storage
+        bond:
+          mode: 802.3ad
+          lacpRate: fast
+          miimon: 100
+          updelay: 200
+          downdelay: 200
+          xmitHashPolicy: layer3+4
+          deviceSelectors:
+            - hardwareAddr: "b4:96:91:10:95:cc"   # enp1s0f0 — X520-DA2 port 0
+            - hardwareAddr: "b4:96:91:10:95:ce"   # enp1s0f1 — X520-DA2 port 1
+        dhcp: false
+        addresses:
+          - "10.200.0.204/24"
+        mtu: 9000
+
+  - hostname: "talos-worker-02"                     # Lenovo M920Q #2 (i5-8600T CPU @ 2.30GHz, 64GB, X520-DA2) — pure worker
+    ipAddress: "10.60.0.205"
+    installDiskSelector:
+      model: "CT1000P310SSD2"                        # Crucial P310 1TB 2230 — system disk; Kingston SNV3S1000G reserved for Longhorn storage
+    machineSpec:
+      secureboot: false
+    talosImageURL: "${talosImageURL}"
+    controlPlane: false
+    patches:
+      - "@./patches/node/machine-volumes-1tb.yaml"
+    nodeLabels:
+      topology.kubernetes.io/region: *region
+      topology.kubernetes.io/zone: homelab-worker-02
+    networkInterfaces:
+      # Management — single Intel I219-LM RJ45 (driver: e1000e)
+      # VLAN 60 (management) is native/untagged on the switch port; address configured
+      # directly on the physical interface.
+      # Native/untagged VLAN 100 (10.100.0.0/24) for Intel AMT is handled by the ME firmware.
+      - deviceSelector:
+          driver: e1000e
+        dhcp: false
+        addresses:
+          - "10.60.0.205/24"
+        routes:
+          - network: "0.0.0.0/0"
+            gateway: "10.60.0.1"
+        mtu: 1500
+        # No VIP — worker nodes do not participate in kube-vip ARP election
+      # Storage — LACP bond of 2x SFP+ ports (Intel X520-DA2, enp1s0f0 + enp1s0f1)
+      # See cp-01 comment above re: hardwareAddr selector rationale.
+      # bond-storage: consistent name across all 3 nodes — retained as the storage-VLAN fabric
+      # for Rook-Ceph (cluster_network on hostNetwork OSDs). The /24 connected route below is all
+      # that's needed; the old per-node /28 cross-node routes (for whereabouts ipvlan-L3) are gone.
+      - interface: bond-storage
+        bond:
+          mode: 802.3ad
+          lacpRate: fast
+          miimon: 100
+          updelay: 200
+          downdelay: 200
+          xmitHashPolicy: layer3+4
+          deviceSelectors:
+            - hardwareAddr: "14:02:ec:6c:6c:7c"   # enp1s0f0 — X520-DA2 port 0
+            - hardwareAddr: "14:02:ec:6c:6c:7d"   # enp1s0f1 — X520-DA2 port 1
+        dhcp: false
+        addresses:
+          - "10.200.0.205/24"
+        mtu: 9000
+
+  # MS-A2 management NIC: RTL8125 (r8169 driver) — verify: lspci -k | grep -A2 Ethernet
+  - hostname: "talos-cp-01"                         # Minisforum MS-A2 (AMD Ryzen 9 9955HX, 32c, 96GB ECC, X710) — permanent CP anchor
+    ipAddress: "10.60.0.201"
+    installDiskSelector:
+      model: "KINGSTON SNV3S1000G"                    # NV3 1TB — boot+etcd; serial pins this to MS-A2 (cp-02 M90q also has NV3 1TB)
+      serial: "50026B7686F8B787"                      # required: NV3 1TB S/N unique to MS-A2; both cp-01 and cp-02 use KINGSTON SNV3S1000G
+    machineSpec:
+      secureboot: false
+    talosImageURL: "${talosImageURL}"
+    controlPlane: true
+    nodeLabels:
+      topology.kubernetes.io/region: *region
+      topology.kubernetes.io/zone: homelab-cp-01
+    patches:
+      - "@./patches/node/machine-volumes-1tb.yaml"
+    networkInterfaces:
+      # Management — single Intel I225/I226 RJ45 (enp4s0, driver: igc)
+      # VLAN 60 (management) is native/untagged on the switch port; address configured directly
+      # on the physical interface. No Intel AMT on MS-A2.
+      - deviceSelector:
+          hardwareAddr: "38:05:25:33:c9:74"      # enp4s0 — Intel I225/I226 (igc)
+        dhcp: false
+        addresses:
+          - "10.60.0.201/24"
+        routes:
+          - network: "0.0.0.0/0"
+            gateway: "10.60.0.1"
+        mtu: 1500
+        vip:
+          ip: "${clusterEndpoint}"
+      # Storage — LACP bond of 2x SFP+ ports (Intel X710/i40e, enp5s0f0np0 + enp5s0f1np1)
+      # NOTE: driver: i40e matched both ports simultaneously; Talos skipped the alias and bond1
+      # never formed. hardwareAddr selectors give unique per-port matches. See cp-01 comment
+      # for why name: selectors cannot be used here.
+      # bond-storage: consistent name across all 3 nodes — retained as the storage-VLAN fabric
+      # for Rook-Ceph (cluster_network on hostNetwork OSDs). The /24 connected route below is all
+      # that's needed; the old per-node /28 cross-node routes (for whereabouts ipvlan-L3) are gone.
+      - interface: bond-storage
+        bond:
+          mode: 802.3ad
+          lacpRate: fast
+          miimon: 100
+          updelay: 200
+          downdelay: 200
+          xmitHashPolicy: layer3+4
+          deviceSelectors:
+            - hardwareAddr: "38:05:25:33:c9:75"   # enp5s0f0np0 — X710 port 0
+            - hardwareAddr: "38:05:25:33:c9:76"   # enp5s0f1np1 — X710 port 1
+        dhcp: false
+        addresses:
+          - "10.200.0.201/24"
+        mtu: 9000
+
+  - hostname: "talos-cp-02"                       # Lenovo M90q #1 (i5-10500T, 6C/12T, 64GB, +X520-DA2 SFP+ 10GbE) — permanent CP
+    ipAddress: "10.60.0.202"
+    installDiskSelector:
+      model: "KINGSTON SNV3S1000G"               # Kingston NV3 1TB — boot disk; CT2000T500SSD8 (T500 2TB) is Ceph OSD
+    machineSpec:
+      secureboot: false
+    talosImageURL: "${talosImageURL}"
+    controlPlane: true
+    nodeLabels:
+      topology.kubernetes.io/region: *region
+      topology.kubernetes.io/zone: homelab-cp-02
+    patches:
+      - "@./patches/node/machine-volumes-1tb.yaml"
+    networkInterfaces:
+      # Management — single Intel I219-LM RJ45 (driver: e1000e) — VLAN 60 (management) is
+      # native/untagged on the switch port; address configured directly on the physical interface.
+      # Native/untagged VLAN 100 (10.100.0.0/24) for Intel AMT is handled by the ME firmware.
+      - deviceSelector:
+          hardwareAddr: "6c:24:08:4b:3f:e1"      # eno1 — onboard Intel NIC
+        dhcp: false
+        addresses:
+          - "10.60.0.202/24"
+        routes:
+          - network: "0.0.0.0/0"
+            gateway: "10.60.0.1"
+        mtu: 1500
+        vip:
+          ip: "${clusterEndpoint}"
+      # Storage — LACP bond of 2x SFP+ ports (Intel X520-DA2 / ixgbe, enp2s0f0 + enp2s0f1).
+      # hardwareAddr selectors used rather than driver: — see cp-01 comment above for why a
+      # driver selector matches both ports at once and prevents the bond from forming.
+      # bond-storage: consistent name across all nodes — the storage-VLAN fabric for Rook-Ceph
+      # (cluster_network on hostNetwork OSDs). Replaced the old eno1.200 VLAN-trunk storage path
+      # 2026-06-18 after adding this card; LACP confirmed (speedMbit: 20000 aggregate) and Ceph
+      # OSD/mon connectivity verified healthy post-cutover.
+      - interface: bond-storage
+        bond:
+          mode: 802.3ad
+          lacpRate: fast
+          miimon: 100
+          updelay: 200
+          downdelay: 200
+          xmitHashPolicy: layer3+4
+          deviceSelectors:
+            - hardwareAddr: "90:e2:ba:e8:e9:d0"   # enp2s0f0 — X520-DA2 port 0
+            - hardwareAddr: "90:e2:ba:e8:e9:d1"   # enp2s0f1 — X520-DA2 port 1
+        dhcp: false
+        addresses:
+          - "10.200.0.202/24"
+        mtu: 9000
+
+  - hostname: "talos-cp-03"                       # Lenovo M90q #2 (i5-10500T, 6C/12T, 64GB, +X520-DA2 SFP+ 10GbE) — permanent CP
+    ipAddress: "10.60.0.203"
+    installDiskSelector:
+      model: "WD PC SN740 SDDQNQD-256G-1001"    # WD SN740 256GB (2230, WLAN slot) — boot disk; CT2000T500SSD8 (T500 2TB) is Ceph OSD
+    machineSpec:
+      secureboot: false
+    talosImageURL: "${talosImageURL}"
+    controlPlane: true
+    nodeLabels:
+      topology.kubernetes.io/region: *region
+      topology.kubernetes.io/zone: homelab-cp-03
+    patches:
+      - "@./patches/node/machine-volumes-1tb.yaml"
+    networkInterfaces:
+      # Management — single Intel I219-LM RJ45 (driver: e1000e) — VLAN 60 (management) is
+      # native/untagged on the switch port; address configured directly on the physical interface.
+      # Native/untagged VLAN 100 (10.100.0.0/24) for Intel AMT is handled by the ME firmware.
+      - deviceSelector:
+          hardwareAddr: "88:a4:c2:cc:ce:ac"      # eno1 — onboard Intel NIC
+        dhcp: false
+        addresses:
+          - "10.60.0.203/24"
+        routes:
+          - network: "0.0.0.0/0"
+            gateway: "10.60.0.1"
+        mtu: 1500
+        vip:
+          ip: "${clusterEndpoint}"
+      # Storage — LACP bond of 2x SFP+ ports (Intel X520-DA2 / ixgbe, enp2s0f0 + enp2s0f1).
+      # hardwareAddr selectors used rather than driver: — see cp-01 comment above for why a
+      # driver selector matches both ports at once and prevents the bond from forming.
+      # bond-storage: consistent name across all nodes — the storage-VLAN fabric for Rook-Ceph
+      # (cluster_network on hostNetwork OSDs). Replaced the old eno1.200 VLAN-trunk storage path
+      # 2026-06-18 after adding this card; LACP confirmed (speedMbit: 20000 aggregate) and Ceph
+      # OSD/mon connectivity verified healthy post-cutover.
+      - interface: bond-storage
+        bond:
+          mode: 802.3ad
+          lacpRate: fast
+          miimon: 100
+          updelay: 200
+          downdelay: 200
+          xmitHashPolicy: layer3+4
+          deviceSelectors:
+            - hardwareAddr: "90:e2:ba:e8:ea:64"   # enp2s0f0 — X520-DA2 port 0
+            - hardwareAddr: "90:e2:ba:e8:ea:65"   # enp2s0f1 — X520-DA2 port 1
+        dhcp: false
+        addresses:
+          - "10.200.0.203/24"
+        mtu: 9000
+
+patches:
+  - "@./patches/global/machine-features.yaml"
+  - "@./patches/global/machine-files.yaml"
+  - "@./patches/global/machine-kubelet.yaml"
+  - "@./patches/global/machine-network.yaml"
+  - "@./patches/global/machine-sysctls.yaml"
+  - "@./patches/global/machine-time.yaml"
+
+controlPlane:
+  patches:
+    - "@./patches/controller/machine-features.yaml"
+    - "@./patches/controller/admission-controller-patch.yaml"
+    - "@./patches/controller/cluster.yaml"

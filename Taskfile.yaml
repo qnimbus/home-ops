@@ -1,0 +1,68 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+---
+version: '3'
+
+set: [pipefail]
+shopt: [globstar]
+
+vars:
+  KUBERNETES_DIR: '{{.ROOT_DIR}}/kubernetes'
+  TALOS_DIR: '{{.ROOT_DIR}}/talos'
+  TALOSCONFIG: '{{.ROOT_DIR}}/talos/clusterconfig/talosconfig'
+
+env:
+  KUBECONFIG: '{{.ROOT_DIR}}/kubeconfig'
+  SOPS_AGE_KEY_FILE: '{{.ROOT_DIR}}/age.key'
+  TALOSCONFIG: '{{.TALOSCONFIG}}'
+
+includes:
+  talos: .taskfiles/talos
+  sops: .taskfiles/sops
+
+tasks:
+
+  default:
+    silent: true
+    cmd: task --list
+
+  reconcile:
+    desc: Force Flux to pull in changes from your Git repository
+    cmd: flux --namespace flux-system reconcile kustomization flux-system --with-source
+    preconditions:
+      - test -f {{.KUBECONFIG}}
+      - which flux
+
+  validate:
+    desc: Validate Kubernetes manifests and kustomize overlays
+    cmd: bash {{.ROOT_DIR}}/scripts/validate.sh -d kubernetes
+    preconditions:
+      - which yq
+      - which kustomize
+      - which kubeconform
+
+  validate:update:
+    desc: Refresh scripts/validate.sh and schemas from the installed gitops-repo-audit skill
+    vars:
+      SKILL_DIR: '{{.ROOT_DIR}}/.agents/skills/gitops-repo-audit'
+      SCRIPT: '{{.ROOT_DIR}}/scripts/validate.sh'
+    cmds:
+      - cp {{.SKILL_DIR}}/scripts/validate.sh {{.SCRIPT}}
+      - cp {{.SKILL_DIR}}/assets/schemas/*.json {{.ROOT_DIR}}/scripts/schemas/
+      - |
+        sed -i 's|# in the assets directory\.$|# in scripts/schemas/.\n#\n# SOURCE: fluxcd/agent-skills gitops-repo-audit skill (scripts/validate.sh + assets/schemas/)\n# UPDATE: run `task validate:update` after `claude skills update` to refresh this file and schemas.|' {{.SCRIPT}}
+      - sed -i 's|assets_schemas_dir="\$skill_dir/assets/schemas"|assets_schemas_dir="$script_dir/schemas"|' {{.SCRIPT}}
+      - |
+        echo "Updated scripts/validate.sh and $(ls {{.ROOT_DIR}}/scripts/schemas/ | wc -l | tr -d ' ') schemas. Review the diff, then run /git-commit"
+    preconditions:
+      - msg: "gitops-repo-audit skill not found at {{.SKILL_DIR}} — run 'claude skills update' first"
+        sh: "test -d {{.SKILL_DIR}}/assets/schemas"
+
+  purge-failed-pods:
+    desc: Delete Failed pods whose owner is healthy [DELETE=true to apply, default is dry-run]
+    vars:
+      DELETE: '{{.DELETE | default "false"}}'
+    cmd: bash {{.ROOT_DIR}}/scripts/purge-failed-pods.sh{{if eq .DELETE "true"}} --delete{{end}}
+    preconditions:
+      - test -f {{.KUBECONFIG}}
+      - which kubectl
+      - which jq

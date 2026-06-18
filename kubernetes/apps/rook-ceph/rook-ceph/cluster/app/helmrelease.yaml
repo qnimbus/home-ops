@@ -1,0 +1,168 @@
+---
+# yaml-language-server: $schema=https://kubernetes-schemas.pages.dev/helm.toolkit.fluxcd.io/helmrelease_v2.json
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: rook-ceph-cluster
+spec:
+  chartRef:
+    kind: OCIRepository
+    name: rook-ceph-cluster
+    namespace: flux-system
+  interval: 1h
+  # The chart's CephCluster name + the operator namespace. Leaving cephVersion
+  # unset lets the chart pick the Ceph image it was tested against.
+  values:
+    operatorNamespace: rook-ceph
+    monitoring:
+      enabled: true
+      createPrometheusRules: true
+    # Built-in toolbox pod — gives us the `ceph` CLI in-cluster for status,
+    # `ceph osd tree`, `ceph -s`, etc. Reach it with:
+    #   kubectl -n rook-ceph exec -it deploy/rook-ceph-tools -- ceph status
+    toolbox:
+      enabled: true
+    cephClusterSpec:
+      cephConfig:
+        global:
+          # All three OSD drives are NVMe SSDs — enable background discard/TRIM
+          # so freed blocks are released back to the device.
+          bdev_enable_discard: "true"
+          bdev_async_discard_threads: "1"
+          # Warn earlier on low mon-store space (percent free).
+          mon_data_avail_warn: "10"
+        osd:
+          # Default is 3; bump to 5 for NVMe workloads where the disk is not
+          # the bottleneck and messenger threads can otherwise become the ceiling.
+          ms_async_op_threads: "5"
+      crashCollector:
+        disable: false
+      csi:
+        # Prefer reading from a local OSD replica when one exists on the node —
+        # avoids a network hop for reads on host-networked OSDs.
+        readAffinity:
+          enabled: true
+      dashboard:
+        enabled: true
+        ssl: false
+      mgr:
+        modules:
+          # Required for Rook to drive the mgr.
+          - name: rook
+            enabled: true
+          # Auto-tunes placement-group counts per pool — removes the classic
+          # "how many PGs?" guesswork. Strongly recommended for new clusters.
+          - name: pg_autoscaler
+            enabled: true
+      # --- The Phase-4 design goal -------------------------------------------
+      # Host networking splits Ceph traffic across our two fabrics:
+      #   public_network  (clients/CSI <-> mons,OSDs) on the 1G mgmt subnet,
+      #   cluster_network (OSD<->OSD replication, heartbeat, backfill) on the
+      #   2x10G LACP storage bond (bond-storage, 9000 MTU).
+      # Configured at greenfield so no mon failover is needed. CSI pods on the
+      # Cilium pod network reach the mon host IPs (10.60.0.0/24) via routing.
+      network:
+        provider: host
+        addressRanges:
+          public:
+            - 10.60.0.0/24
+          cluster:
+            - 10.200.0.0/24
+      resources:
+        mgr:
+          requests:
+            cpu: 60m
+            memory: 512Mi
+          limits:
+            memory: 1280Mi
+        mon:
+          requests:
+            cpu: 60m
+            memory: 512Mi
+          limits:
+            memory: 1Gi
+        osd:
+          requests:
+            cpu: 150m
+            memory: 2Gi
+          limits:
+            memory: 4Gi
+      storage:
+        # Never auto-consume disks — we name exactly one spare per node so the
+        # OS/system NVMe can never be picked up as an OSD by mistake.
+        useAllNodes: false
+        useAllDevices: false
+        config:
+          # 2 OSDs per NVMe creates independent TCP flows between node pairs,
+          # allowing the LACP bond to distribute replication traffic across
+          # both 10GbE links instead of pinning to one.
+          osdsPerDevice: "2"
+        # Devices are pinned by /dev/disk/by-id (stable across reboots). This
+        # matters because NVMe kernel enumeration is NOT consistent: on cp-01
+        # (MS-A2) the system disk is nvme0n1 and the OSD spare is nvme1n1 — the
+        # reverse of worker-01/worker-02. A kernel-name selector would be a data-loss footgun.
+        nodes:
+          - name: talos-cp-01                          # MS-A2 — Crucial T500 2TB (CT2000T500SSD8, S/N 2545543A2190)
+            devices:
+              - name: /dev/disk/by-id/nvme-CT2000T500SSD8_2545543A2190
+          - name: talos-cp-02                          # M90q #1 — Crucial T500 2TB (CT2000T500SSD8, S/N 25405348D601)
+            devices:
+              - name: /dev/disk/by-id/nvme-CT2000T500SSD8_25405348D601
+          - name: talos-cp-03                          # M90q #2 — Crucial T500 2TB (CT2000T500SSD8, S/N 254053487747)
+            devices:
+              - name: /dev/disk/by-id/nvme-CT2000T500SSD8_254053487747
+          - name: talos-worker-01                      # M920q #1 — Crucial P310 2TB (CT2000P310SSD8, S/N 252450B1A33B; DRAM-less)
+            devices:
+              - name: /dev/disk/by-id/nvme-CT2000P310SSD8_252450B1A33B
+          - name: talos-worker-02                      # M920q #2 — Kingston NV3 1TB (SNV3S1000G, S/N 50026B7383B9D0CC); half the others' 2TB OSD disk
+            config:
+              # Override the cluster-wide osdsPerDevice:2 (storage.config above) for
+              # this node only. That default exists to spread replication traffic
+              # across both LACP links as independent TCP flows — worthwhile on the
+              # other 4 nodes' 2TB disks, but not here: this disk is half their size,
+              # so splitting it would still double the per-OSD-pod resource
+              # reservation (cpu/memory requests/limits below are per-pod) for a
+              # total contribution of only ~931GB raw either way. With 5 nodes and
+              # 8+ OSDs already in the mesh, the extra local flow diversity buys
+              # little; one OSD keeps this — the weakest host's — reservation lean
+              # and gives the full device queue depth to a single BlueStore instance
+              # instead of splitting it across two.
+              osdsPerDevice: "1"
+            devices:
+              - name: /dev/disk/by-id/nvme-KINGSTON_SNV3S1000G_50026B7383B9D0CC
+    # Replicated RBD pool + its StorageClass. size=3 / failureDomain=host means
+    # one replica per node — full host-level redundancy (usable capacity is
+    # gated by the smallest host, ~1TB, until the cluster grows).
+    cephBlockPools:
+      - name: ceph-blockpool
+        spec:
+          failureDomain: host
+          replicated:
+            size: 3
+        storageClass:
+          enabled: true
+          name: ceph-block
+          # No default StorageClass exists today; make replicated block the
+          # cluster default so unqualified PVCs land on redundant storage.
+          isDefault: true
+          reclaimPolicy: Delete
+          allowVolumeExpansion: true
+          volumeBindingMode: Immediate
+          mountOptions: ["discard"]
+          parameters:
+            imageFormat: "2"
+            imageFeatures: layering,fast-diff,object-map,deep-flatten,exclusive-lock
+            csi.storage.k8s.io/provisioner-secret-name: rook-csi-rbd-provisioner
+            csi.storage.k8s.io/provisioner-secret-namespace: "{{ .Release.Namespace }}"
+            csi.storage.k8s.io/controller-expand-secret-name: rook-csi-rbd-provisioner
+            csi.storage.k8s.io/controller-expand-secret-namespace: "{{ .Release.Namespace }}"
+            csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node
+            csi.storage.k8s.io/node-stage-secret-namespace: "{{ .Release.Namespace }}"
+            csi.storage.k8s.io/fstype: ext4
+    # VolumeSnapshotClass needs the external-snapshotter CRDs, which we have not
+    # deployed yet — leaving it on would fail the Flux dry-run. Enable alongside
+    # a snapshot-controller later.
+    cephBlockPoolsVolumeSnapshotClass:
+      enabled: false
+    cephFileSystems: []
+    cephObjectStores: []

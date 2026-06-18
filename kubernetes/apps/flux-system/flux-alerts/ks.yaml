@@ -1,0 +1,32 @@
+---
+# yaml-language-server: $schema=https://schemas.clustrs.dev/kustomize.toolkit.fluxcd.io/kustomization_v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: &app flux-alerts
+  namespace: flux-system
+spec:
+  targetNamespace: flux-system
+  commonMetadata:
+    labels:
+      app.kubernetes.io/name: *app
+  dependsOn:
+    - name: kube-prometheus-stack
+      namespace: flux-system
+  wait: true
+  prune: true
+  interval: 1h
+  path: ./kubernetes/apps/flux-system/flux-alerts/app
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+    namespace: flux-system
+  healthChecks:
+    - apiVersion: notification.toolkit.fluxcd.io/v1beta3
+      kind: Provider
+      name: alertmanager
+      namespace: flux-system
+    - apiVersion: notification.toolkit.fluxcd.io/v1beta3
+      kind: Alert
+      name: flux-errors
+      namespace: flux-system

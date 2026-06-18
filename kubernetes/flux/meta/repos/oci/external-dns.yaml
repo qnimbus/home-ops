@@ -1,0 +1,21 @@
+---
+# yaml-language-server: $schema=https://schemas.clustrs.dev/source.toolkit.fluxcd.io/ocirepository_v1.json
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: external-dns
+  namespace: flux-system
+spec:
+  interval: 1h
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: copy
+  url: oci://ghcr.io/home-operations/charts-mirror/external-dns
+  ref:
+    # renovate: datasource=docker depName=ghcr.io/home-operations/charts-mirror/external-dns
+    tag: "1.21.1"
+  verify:
+    provider: cosign
+    matchOIDCIdentity:
+      - issuer: https://token.actions.githubusercontent.com
+        subject: ^https://github.com/home-operations/
